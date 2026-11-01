@@ -1,26 +1,21 @@
-//! 定义本机索引不泄露路径或原始记录的稳定错误边界。
+//! 只读来源访问和解析错误，不携带客户端数据库或任务调度语义。
 
 use thiserror::Error;
 
 use crate::TokenUsageError;
 
-/// 标识本机索引可以稳定映射的错误类别。
+/// 来源读取与用量解析可以稳定映射的错误类别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LocalErrorKind {
-    /// 调用方给出的数据根或 app-data 位置不符合边界要求。
+    /// 调用方给出的数据根不符合边界要求。
     InvalidPath,
-    /// 当前用户没有读取来源或写入本产品索引的权限。
+    /// 当前用户没有读取来源的权限。
     PermissionDenied,
     /// 只读来源在扫描期间消失或无法打开。
     SourceUnavailable,
-    /// 数据库 schema 比当前 adapter 新，必须停止写入。
-    UnsupportedSchema,
-    /// 数据库初始化、事务或查询失败。
-    Database,
-    /// Token 字段违反 core 的业务不变量。
+    /// Token 字段违反共享用量模型的不变量。
     InvalidUsage,
-    /// 当前已有一个写扫描，拒绝第二个 writer。
-    ScanBusy,
     /// 内部计数或偏移无法安全表示。
     Overflow,
 }
@@ -43,6 +38,11 @@ impl LocalError {
     /// 创建一个只含稳定类别与静态脱敏说明的错误。
     pub const fn new(kind: LocalErrorKind, message: &'static str) -> Self {
         Self { kind, message }
+    }
+
+    /// 返回只含静态脱敏说明的原始文案，供宿主错误层无损转换。
+    pub const fn message(&self) -> &'static str {
+        self.message
     }
 
     /// 返回供调用方映射的稳定错误类别。
@@ -69,8 +69,11 @@ mod tests {
         fn assert_standard_error<T: std::error::Error>() {}
 
         assert_standard_error::<LocalError>();
-        let error = LocalError::new(LocalErrorKind::Database, "local index operation failed");
-        assert_eq!(error.kind(), LocalErrorKind::Database);
-        assert_eq!(error.to_string(), "local index operation failed");
+        let error = LocalError::new(
+            LocalErrorKind::SourceUnavailable,
+            "local source operation failed",
+        );
+        assert_eq!(error.kind(), LocalErrorKind::SourceUnavailable);
+        assert_eq!(error.to_string(), "local source operation failed");
     }
 }

@@ -1,8 +1,6 @@
-//! 定义用户登记数据根与本机索引 registry 的非敏感展示记录。
+//! 定义调用方登记的数据根输入与发现方式，不实现登记存储。
 
 use std::path::PathBuf;
-
-use crate::{CoverageState, RootActivationState};
 
 /// 标识数据根是由哪个受控入口发现或登记的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,15 +17,9 @@ pub enum DiscoveryMethod {
     MetadataDiscovery,
 }
 
-// as_str/from_label 这对函数是本模块反复出现的模式：数据库里存文本标签
-// 而不是整数，是为了让数据库文件本身具备可读性（便于人工排查），同时
-// `from_label` 对未知字符串返回 None 而不是 panic，让调用方能优雅处理
-// “数据库被更新版本写过、出现了本版本不认识的标签”这种前向兼容场景。
-// 命名为 `from_label` 而不是 `from_str`：避免和标准库 `FromStr::from_str`
-// 混淆（clippy::should_implement_trait），也与本文件里
-// `coverage_state_from_label`/`confidence_from_label` 保持一致命名。
+// 稳定文本标签供消费方序列化或持久化；未知标签返回 None，不推断新语义。
 impl DiscoveryMethod {
-    /// 返回用于数据库存储的稳定短标签。
+    /// 返回与消费客户端兼容的稳定短标签。
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::DefaultHome => "default_home",
@@ -38,7 +30,7 @@ impl DiscoveryMethod {
         }
     }
 
-    /// 从当前 schema 的稳定标签恢复发现方式。
+    /// 从已知稳定标签恢复发现方式。
     pub fn from_label(value: &str) -> Option<Self> {
         match value {
             "default_home" => Some(Self::DefaultHome),
@@ -78,48 +70,4 @@ pub struct RegisteredRoot {
     pub alias: String,
     /// 禁用的数据根保留登记信息但不参与快速扫描。
     pub enabled: bool,
-}
-
-/// 表示 registry 中一个可展示的数据根，不返回其绝对访问路径。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RootRecord {
-    /// adapter 根据访问位置生成的稳定根 ID。
-    pub root_id: String,
-    /// 用户别名或安全默认名称。
-    pub alias: String,
-    /// 标识该根当前是否参与扫描。
-    pub enabled: bool,
-    /// 首次确认、索引中、可周期更新或验证失败的独立状态。
-    pub activation_state: RootActivationState,
-    /// 标识该根是否为 Codex 唯一主数据目录。
-    pub is_primary: bool,
-    /// 根的发现或登记方式。
-    pub discovery_method: DiscoveryMethod,
-    /// 最近一次扫描对该根的覆盖结论。
-    pub last_coverage: Option<CoverageState>,
-    /// 当前索引仍保留 checkpoint 的来源文件数量。
-    pub source_file_count: u64,
-    /// 当前 generation 中可追溯的调用观察数量，canonical 去重在 core 另行完成。
-    pub call_observation_count: u64,
-}
-
-/// 把 core 覆盖状态转换为数据库稳定标签。
-pub const fn coverage_state_label(state: CoverageState) -> &'static str {
-    match state {
-        CoverageState::Complete => "complete",
-        CoverageState::Partial => "partial",
-        CoverageState::Cancelled => "cancelled",
-        CoverageState::Failed => "failed",
-    }
-}
-
-/// 从当前 schema 的稳定标签恢复 core 覆盖状态。
-pub fn coverage_state_from_label(value: &str) -> Option<CoverageState> {
-    match value {
-        "complete" => Some(CoverageState::Complete),
-        "partial" => Some(CoverageState::Partial),
-        "cancelled" => Some(CoverageState::Cancelled),
-        "failed" => Some(CoverageState::Failed),
-        _ => None,
-    }
 }

@@ -9,10 +9,12 @@ use crate::{
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use super::super::CancellationToken;
+use super::super::LocalError;
 use super::super::discovery::stable_id;
 use super::super::file_source::map_source_io_error;
 use super::super::jsonl_lines::{JsonlRecord, LineFlow, read_jsonl_records};
-use super::super::{CancellationToken, LocalError};
 use record::{LineOutcome, TranscriptRecord};
 
 mod record;
@@ -131,7 +133,7 @@ pub fn parse_claude_jsonl_stream<R, F>(
     max_line_bytes: usize,
     context: &mut ClaudeJsonlParseContext,
     provenance: &SourceProvenance,
-    cancellation: &CancellationToken,
+    cancellation: &dyn crate::CancellationSignal,
     mut on_call: F,
 ) -> Result<ClaudeJsonlParseReport, LocalError>
 where

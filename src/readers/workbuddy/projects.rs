@@ -54,7 +54,7 @@ impl WorkbuddyProjectFiles {
 }
 
 /// 只枚举 `projects/<project>/<session>.jsonl` 与一层 `subagents/*.jsonl`。
-pub(super) fn discover_project_files<C: WorkbuddyCancellation>(
+pub(super) fn discover_project_files<C: WorkbuddyCancellation + ?Sized>(
     workbuddy_home: &Path,
     cancellation: &C,
 ) -> Result<WorkbuddyProjectFiles, WorkbuddyReadError> {
@@ -102,7 +102,7 @@ pub(super) fn discover_project_files<C: WorkbuddyCancellation>(
 }
 
 /// 枚举单个 project 目录的顶层 transcript 与 session/subagents 目录。
-fn enumerate_project<C: WorkbuddyCancellation>(
+fn enumerate_project<C: WorkbuddyCancellation + ?Sized>(
     project_dir: &Path,
     project_name: &str,
     result: &mut WorkbuddyProjectFiles,
@@ -146,7 +146,7 @@ fn enumerate_project<C: WorkbuddyCancellation>(
 }
 
 /// 只进入 session 目录下字面量为 `subagents` 的一层子目录。
-fn enumerate_subagents<C: WorkbuddyCancellation>(
+fn enumerate_subagents<C: WorkbuddyCancellation + ?Sized>(
     session_dir: &Path,
     project_name: &str,
     result: &mut WorkbuddyProjectFiles,
@@ -238,7 +238,7 @@ fn push_file(
 }
 
 /// 读取并按文件名排序目录项，同时应用全局目录项预算。
-fn read_sorted_entries<C: WorkbuddyCancellation>(
+fn read_sorted_entries<C: WorkbuddyCancellation + ?Sized>(
     directory: &Path,
     result: &mut WorkbuddyProjectFiles,
     entry_budget: &mut usize,
@@ -267,7 +267,7 @@ fn read_sorted_entries<C: WorkbuddyCancellation>(
 }
 
 /// 取消与 I/O 失败共享 WorkBuddy 脱敏失败面，由 Collect 上下文另行识别 interrupted。
-fn ensure_not_cancelled<C: WorkbuddyCancellation>(
+fn ensure_not_cancelled<C: WorkbuddyCancellation + ?Sized>(
     cancellation: &C,
 ) -> Result<(), WorkbuddyReadError> {
     if cancellation.is_cancelled() {

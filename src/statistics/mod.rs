@@ -6,9 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CanonicalUsageSet, Confidence, TokenUsage, TokenUsageError, UsageCall};
 
-/// 统计页最多展示的分组数量；超出部分归入 remainder。
-pub const STATISTICS_GROUP_LIMIT: usize = 10;
-
 /// 标识本机统计允许使用的固定分组维度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -226,7 +223,7 @@ fn stable_key(key: &Option<String>) -> &str {
 }
 
 /// 对一组互斥 canonical 调用构造可加总统计量并保留 duplicate 事实。
-pub(crate) fn measure_calls<'a>(
+pub fn measure_calls<'a>(
     calls: impl Iterator<Item = &'a UsageCall>,
     canonical: &CanonicalUsageSet,
 ) -> Result<UsageMeasure, TokenUsageError> {

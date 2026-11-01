@@ -3,13 +3,13 @@
 use thiserror::Error;
 
 use crate::aggregate::copy_matching_snapshots;
-use crate::{CanonicalUsageSet, RetentionDays, TimeStandard, filter_canonical_usage};
+use crate::{CanonicalUsageSet, TimeStandard, filter_canonical_usage};
 use jiff::civil::{Date, DateTime, Time};
 use jiff::tz::{AmbiguousOffset, TimeZone};
 use jiff::{Timestamp, ToSpan};
 use serde::{Deserialize, Serialize};
 
-/// 标识看板、图表、用量统计与排行榜共用的日历窗口。
+/// 标识显式选择的常用民用日历窗口，不决定宿主页面默认值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LocalUsageWindow {
@@ -26,23 +26,6 @@ pub enum LocalUsageWindow {
     ThisMonth,
     /// 上一自然月：1 日至月末。
     LastMonth,
-}
-
-impl LocalUsageWindow {
-    /// 概览固定装配的六个日历窗口，顺序与界面筛选一致。
-    pub const OVERVIEW_WINDOWS: [Self; 6] = [
-        Self::Today,
-        Self::Yesterday,
-        Self::ThisWeek,
-        Self::LastWeek,
-        Self::ThisMonth,
-        Self::LastMonth,
-    ];
-
-    /// 用量统计页缺省窗口；旧设置缺该字段时使用，与概览默认当天不同。
-    pub const fn default_usage_query() -> Self {
-        Self::ThisWeek
-    }
 }
 
 /// 本机自然日窗口所需的 UTC 毫秒边界。
@@ -246,14 +229,14 @@ pub fn local_dates_for_day_count(
     )
 }
 
-/// 返回保留窗口下界：观测日及其往前连续 `days - 1` 个所选标准民用日的首日起点。
-pub fn retention_cutoff_epoch_ms(
-    days: RetentionDays,
+/// 返回日历区间下界：观测日及其往前连续 `days - 1` 个所选标准民用日的首日起点。
+pub fn calendar_cutoff_epoch_ms(
+    day_count: u16,
     observed_at_epoch_ms: i64,
     standard: &TimeStandard,
     device_tz: &TimeZone,
 ) -> Result<i64, TimelineError> {
-    let dates = dates_for_day_count(days.get(), observed_at_epoch_ms, standard, device_tz)?;
+    let dates = dates_for_day_count(day_count, observed_at_epoch_ms, standard, device_tz)?;
     let first = dates
         .first()
         .copied()
@@ -534,7 +517,3 @@ pub fn civil_at(date: Date, hour: u32, minute: u32, second: u32) -> Option<DateT
 #[cfg(test)]
 #[path = "timeline_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "date_window_reconcile_tests.rs"]
-mod date_window_reconcile_tests;

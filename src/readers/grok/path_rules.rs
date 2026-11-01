@@ -4,6 +4,12 @@ use std::path::{Component, Path};
 
 /// 判定相对路径是否为可索引的 Grok 完成轮次文件。
 pub fn is_grok_updates_path(relative: &Path) -> bool {
+    if relative
+        .components()
+        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
     let parts = relative
         .components()
         .filter_map(|component| match component {

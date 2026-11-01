@@ -5,9 +5,11 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+#[cfg(test)]
+use super::CancellationToken;
 use super::discovery::walk_ancestors_for_link_component;
 use super::jsonl::{ROLLOUT_SIGNATURE_MAX_BYTES, is_rollout_signature_line};
-use super::{CancellationToken, DiscoveredRoot, LocalError, LocalErrorKind};
+use super::{DiscoveredRoot, LocalError, LocalErrorKind};
 
 /// 把来源文件的底层 I/O 错误脱敏映射为 core 的稳定领域错误。
 pub fn map_source_io_error(error: std::io::Error) -> LocalError {
@@ -102,12 +104,7 @@ pub fn validate_rollout_path(
     file_path: &Path,
     archived: bool,
 ) -> Result<(), LocalError> {
-    let relative = file_path.strip_prefix(&root.path).map_err(|_| {
-        LocalError::new(
-            LocalErrorKind::InvalidPath,
-            "rollout source escaped its root",
-        )
-    })?;
+    let relative = source_relative_path(&root.path, file_path)?;
     let mut components = relative.components();
     let expected_area = if archived {
         "archived_sessions"
@@ -148,7 +145,7 @@ pub fn is_rollout_jsonl(path: &Path) -> bool {
 //      不会因为路径被中途调包而读到不该读的文件。
 pub fn inspect_rollout_file(
     path: &Path,
-    cancellation: &CancellationToken,
+    cancellation: &dyn crate::CancellationSignal,
     budget: &mut RolloutProbeBudget,
 ) -> RolloutFileInspection {
     if cancellation.is_cancelled() {
@@ -294,6 +291,27 @@ pub fn modified_epoch_ms(metadata: &fs::Metadata) -> i64 {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .and_then(|duration| i64::try_from(duration.as_millis()).ok())
         .unwrap_or_default()
+}
+
+/// 在任何来源打开前拒绝根外路径、父目录跳转及非普通相对组件。
+///
+/// # Errors
+/// 路径不属于当前根、为空或包含父目录/根/平台前缀时返回固定路径错误。
+pub fn source_relative_path<'a>(root: &Path, path: &'a Path) -> Result<&'a Path, LocalError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| LocalError::new(LocalErrorKind::InvalidPath, "source escaped its root"))?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(LocalError::new(
+            LocalErrorKind::InvalidPath,
+            "source path contains an unsafe component",
+        ));
+    }
+    Ok(relative)
 }
 
 #[cfg(test)]

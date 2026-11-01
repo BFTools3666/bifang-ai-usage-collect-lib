@@ -11,10 +11,12 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(test)]
+use super::CancellationToken;
 use super::discovery::stable_id;
 use super::file_source::map_source_io_error;
 use super::jsonl_lines::{JsonlRecord, LineFlow, read_jsonl_records};
-use super::{CancellationToken, LocalError, LocalErrorKind};
+use super::{LocalError, LocalErrorKind};
 
 mod codec;
 mod context;
@@ -171,7 +173,7 @@ impl JsonlParseContext {
         })
         .map_err(|_| {
             LocalError::new(
-                LocalErrorKind::Database,
+                LocalErrorKind::InvalidUsage,
                 "rollout parser state encoding failed",
             )
         })
@@ -219,7 +221,7 @@ pub fn parse_jsonl_stream<R, F>(
     max_line_bytes: usize,
     context: &mut JsonlParseContext,
     provenance: &SourceProvenance,
-    cancellation: &CancellationToken,
+    cancellation: &dyn crate::CancellationSignal,
     mut on_call: F,
 ) -> Result<JsonlParseReport, LocalError>
 where

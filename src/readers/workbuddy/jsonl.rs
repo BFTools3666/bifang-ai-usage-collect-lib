@@ -118,7 +118,7 @@ enum LineOutcome {
 }
 
 /// 枚举并读取全部获批 project JSONL 布局；单文件失败时保留其它可用事实并标为部分覆盖。
-pub(super) fn read_project_usage<C: WorkbuddyCancellation>(
+pub(super) fn read_project_usage<C: WorkbuddyCancellation + ?Sized>(
     workbuddy_home: &Path,
     root_id: &str,
     cancellation: &C,
@@ -227,7 +227,7 @@ struct ProjectStreamReport {
 }
 
 /// 用共享有界切行器逐行反序列化白名单字段；超长行流式解析，末尾半行不提交。
-fn parse_project_stream<C: WorkbuddyCancellation>(
+fn parse_project_stream<C: WorkbuddyCancellation + ?Sized>(
     reader: Take<File>,
     source: &WorkbuddyProjectFile,
     root_id: &str,

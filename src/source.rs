@@ -3,10 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    Completeness, Confidence, Freshness, ProviderKind, TokenUsage, coverage_completeness,
-    empty_token_usage_for_provider,
-};
+use crate::{Confidence, ProviderKind, TokenUsage, empty_token_usage_for_provider};
 
 /// 按 provider 选择可复用的本机聚合空值模板。
 pub fn empty_local_usage_aggregate_for_provider(provider: ProviderKind) -> LocalUsageAggregate {
@@ -25,31 +22,6 @@ pub fn empty_local_usage_aggregate_for_provider(provider: ProviderKind) -> Local
     }
 }
 
-/// 评估本机索引窗口在扫描状态、覆盖状态与聚合置信度下的事实质量。
-pub fn local_fact_quality(
-    index_state: LocalIndexState,
-    coverage_state: CoverageState,
-    aggregate_confidence: Confidence,
-) -> (Freshness, Completeness, Confidence) {
-    match index_state {
-        LocalIndexState::NotScanned | LocalIndexState::NeedsRescan => (
-            Freshness::Unknown,
-            Completeness::Unknown,
-            Confidence::Derived,
-        ),
-        LocalIndexState::ReadyNoCalls | LocalIndexState::Ready => (
-            Freshness::Fresh,
-            coverage_completeness(coverage_state),
-            aggregate_confidence,
-        ),
-    }
-}
-
-/// 只有旧 parser generation 导致的明确重建状态才需要在启动后立即回补。
-pub const fn immediate_reindex_required(index_state: LocalIndexState) -> bool {
-    matches!(index_state, LocalIndexState::NeedsRescan)
-}
-
 /// 描述一次发现或扫描对用户授权范围的覆盖结论。
 // Hash：允许把该类型放进 HashMap/HashSet 的 key 或做去重集合的元素；
 // 纯数据的 enum/struct 常见搭配 Debug+Clone+PartialEq+Eq(+Hash) 这一组 derive。
@@ -64,74 +36,6 @@ pub enum CoverageState {
     Cancelled,
     /// 扫描未能生成可用覆盖结果。
     Failed,
-}
-
-/// 区分本机索引尚未建立、需要重扫、已扫描空结果与可用调用，避免把采集缺失误作真实零值。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum LocalIndexState {
-    /// 本产品没有任何扫描运行或当前来源，不能把空聚合解释为真实零用量。
-    NotScanned,
-    /// 已有来源只属于旧 parser generation，必须重建后才能进入当前统计。
-    NeedsRescan,
-    /// 至少执行过一次扫描，但当前 parser generation 没有可用 canonical 调用。
-    ReadyNoCalls,
-    /// 当前 parser generation 已包含可参与统计的 canonical 调用。
-    Ready,
-}
-
-/// 从持久层读取的安全计数事实推导本机索引四态。
-pub const fn local_index_state_from_facts(
-    completed_scan_count: u64,
-    current_source_count: u64,
-    stale_source_count: u64,
-    enabled_unscanned_root_count: u64,
-    enabled_root_count: u64,
-    canonical_call_count: usize,
-) -> LocalIndexState {
-    if enabled_root_count == 0 {
-        LocalIndexState::NotScanned
-    } else if stale_source_count > 0 {
-        LocalIndexState::NeedsRescan
-    } else if canonical_call_count > 0 {
-        LocalIndexState::Ready
-    } else if enabled_unscanned_root_count > 0
-        || (completed_scan_count == 0 && current_source_count == 0)
-    {
-        LocalIndexState::NotScanned
-    } else {
-        LocalIndexState::ReadyNoCalls
-    }
-}
-
-#[cfg(test)]
-mod local_index_state_tests {
-    use super::*;
-
-    /// 旧 parser、可信调用、未扫根和真实空结果按保守优先级解析。
-    #[test]
-    fn derives_local_index_state_from_storage_facts() {
-        assert_eq!(
-            local_index_state_from_facts(1, 1, 1, 0, 1, 2),
-            LocalIndexState::NeedsRescan
-        );
-        assert_eq!(
-            local_index_state_from_facts(1, 1, 0, 0, 1, 2),
-            LocalIndexState::Ready
-        );
-        assert_eq!(
-            local_index_state_from_facts(1, 1, 0, 1, 1, 0),
-            LocalIndexState::NotScanned
-        );
-        assert_eq!(
-            local_index_state_from_facts(1, 1, 0, 0, 1, 0),
-            LocalIndexState::ReadyNoCalls
-        );
-        assert_eq!(
-            local_index_state_from_facts(1, 1, 0, 0, 0, 9),
-            LocalIndexState::NotScanned
-        );
-    }
 }
 
 /// 汇总扫描边界与可见跳过计数，不包含绝对路径。
@@ -203,7 +107,7 @@ pub struct UsageCall {
 ///
 /// ADR-104 后生产总量只累计 rollout 自有区段的 canonical 调用；本结构继续保留
 /// 历史诊断与索引兼容性，不得覆盖窗口、日桶、分组、调用或 Collect 总量。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTokenSnapshot {
     /// 稳定线程键（`stable_id("thread", session_id)`），不是 jsonl 文件名。
     pub thread_key: String,

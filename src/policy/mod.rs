@@ -234,7 +234,7 @@ pub use claude_desktop_agent_home::{
 mod source_root_alias;
 pub use source_root_alias::source_root_alias_from_path;
 mod source_visit;
-pub use source_visit::{SourceFileObservation, retain_ingestable_calls, source_file_needs_visit};
+pub use source_visit::{SourceFileObservation, source_file_needs_visit};
 mod workbuddy_scan_source;
 pub use workbuddy_scan_source::{
     WORKBUDDY_HOME_DIR_NAME, WORKBUDDY_INTERNATIONAL_HOME_DIR_NAME, WORKBUDDY_PROJECTS_DIR_NAME,

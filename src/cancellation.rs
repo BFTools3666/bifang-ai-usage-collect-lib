@@ -24,3 +24,23 @@ impl ScanCancellation {
         self.cancelled.load(Ordering::Acquire)
     }
 }
+
+/// 宿主可实现的协作取消检查；不绑定令牌、运行时或线程所有权。
+pub trait CancellationSignal: Send + Sync {
+    /// 返回当前读取是否应在下一个安全边界结束。
+    fn is_cancelled(&self) -> bool;
+}
+
+impl CancellationSignal for ScanCancellation {
+    /// 复用普通扫描令牌的原子取消状态。
+    fn is_cancelled(&self) -> bool {
+        ScanCancellation::is_cancelled(self)
+    }
+}
+
+impl<F: Fn() -> bool + Send + Sync> CancellationSignal for F {
+    /// 允许调用方以闭包借用自身取消标记，无需复制库内令牌。
+    fn is_cancelled(&self) -> bool {
+        self()
+    }
+}

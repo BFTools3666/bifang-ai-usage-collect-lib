@@ -6,12 +6,7 @@ use crate::{LocalError, LocalErrorKind};
 
 /// 只允许 Claude 官方 transcript 的主会话与 subagent 两种相对层级。
 pub fn validate_transcript_path(root_path: &Path, file_path: &Path) -> Result<(), LocalError> {
-    let relative = file_path.strip_prefix(root_path).map_err(|_| {
-        LocalError::new(
-            LocalErrorKind::InvalidPath,
-            "Claude transcript escaped its root",
-        )
-    })?;
+    let relative = crate::readers::file_source::source_relative_path(root_path, file_path)?;
     let parts = relative
         .components()
         .map(|component| component.as_os_str().to_string_lossy())

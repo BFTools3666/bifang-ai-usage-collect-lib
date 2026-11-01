@@ -22,7 +22,7 @@ pub enum WorkbuddyUsageOrigin {
 
 /// adapter 从单条 JSONL 记录投影出的最小用量事实。
 ///
-/// 所有身份字段在进入 core 前已经过稳定哈希；项目标签只允许安全末段。该结构
+/// 读取器输出的身份字段已经过稳定哈希；项目标签只允许安全末段。该结构
 /// 不实现 `Debug` 或序列化，避免未来日志误带尚未校验的模型文本。
 #[derive(Clone, PartialEq)]
 pub struct WorkbuddyUsageEventRecord {
@@ -36,11 +36,11 @@ pub struct WorkbuddyUsageEventRecord {
     pub source_id: String,
     /// 请求发生时刻的 Unix 毫秒时间戳。
     pub occurred_at_epoch_ms: i64,
-    /// 当前事件实际执行的模型；core 会执行安全 slug 校验。
+    /// 当前事件实际执行的模型；规范化时执行安全 slug 校验。
     pub model: Option<String>,
     /// 内容无关的项目稳定 ID。
     pub project_key: Option<String>,
-    /// 已截取的安全项目末段；core 会再次校验。
+    /// 已截取的安全项目末段；规范化时再次校验。
     pub project_label: Option<String>,
     /// 上游 `providerData.usage.requests`；当前合法值固定为 1。
     pub request_count: i64,
@@ -69,45 +69,37 @@ pub struct WorkbuddyUsageQuality {
     pub duplicate_record_count: u64,
 }
 
-/// core 内部已验证且已去重的逐请求聚合事件。
-#[derive(Clone)]
-pub(super) struct ValidatedWorkbuddyUsageRecord {
+/// 已验证并去重的逐请求事实，可由消费方聚合或投影到 wire 数据。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ValidatedWorkbuddyUsageRecord {
     /// 稳定逻辑调用 ID，去重与冲突判定的键。
-    pub(super) logical_call_id: String,
+    pub logical_call_id: String,
     /// 所属数据根 ID。
-    pub(super) root_id: String,
+    pub root_id: String,
     /// 会话键，用于归并同一会话。
-    pub(super) session_key: String,
+    pub session_key: String,
     /// 贡献该调用的来源文件 ID；重复观察会合并到同一调用。
-    pub(super) source_ids: Vec<String>,
+    pub source_ids: Vec<String>,
     /// 调用发生时间（毫秒 Unix 时间戳）。
-    pub(super) occurred_at_epoch_ms: i64,
+    pub occurred_at_epoch_ms: i64,
     /// 模型名；来源未提供为 `None`。
-    pub(super) model: Option<String>,
+    pub model: Option<String>,
     /// 项目键，用于按项目归并；缺失为 `None`。
-    pub(super) project_key: Option<String>,
+    pub project_key: Option<String>,
     /// 项目展示标签，已脱敏；缺失为 `None`。
-    pub(super) project_label: Option<String>,
+    pub project_label: Option<String>,
     /// 该调用包含的请求数。
-    pub(super) request_count: u32,
+    pub request_count: u32,
     /// Token 用量，已通过不变量校验。
-    pub(super) usage: TokenUsage,
+    pub usage: TokenUsage,
     /// 积分消耗；来源未提供或非法为 `None`。
-    pub(super) credit: Option<f64>,
+    pub credit: Option<f64>,
     /// 调用的来源类别（如 project 日志）。
-    pub(super) origin: WorkbuddyUsageOrigin,
-}
-
-/// 只返回质量计数；当前仅用于核对校验与去重规则。
-#[cfg(test)]
-pub(super) fn workbuddy_usage_quality(
-    records: &[WorkbuddyUsageEventRecord],
-) -> WorkbuddyUsageQuality {
-    prepare_workbuddy_usage_records(records).1
+    pub origin: WorkbuddyUsageOrigin,
 }
 
 /// 校验、稳定归一化并按逻辑调用 ID 去重；冲突组整组失败关闭。
-pub(super) fn prepare_workbuddy_usage_records(
+pub fn prepare_workbuddy_usage_records(
     records: &[WorkbuddyUsageEventRecord],
 ) -> (Vec<ValidatedWorkbuddyUsageRecord>, WorkbuddyUsageQuality) {
     let mut quality = WorkbuddyUsageQuality::default();

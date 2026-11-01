@@ -5,7 +5,5 @@ mod snapshot;
 mod source_registry;
 pub use error::{LocalError, LocalErrorKind};
 pub use id_codec::{path_key, stable_id};
-pub use snapshot::{SourceParseCheckpoint, UsageSnapshot};
-pub use source_registry::{
-    DiscoveryMethod, RegisteredRoot, RootRecord, coverage_state_from_label, coverage_state_label,
-};
+pub use snapshot::SourceParseCheckpoint;
+pub use source_registry::{DiscoveryMethod, RegisteredRoot};

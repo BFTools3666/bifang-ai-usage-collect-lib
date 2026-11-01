@@ -1,10 +1,4 @@
-//! 来源文件是否进入本轮解析、以及解析结果中哪些调用允许入库的统一规则。
-//!
-//! 扫描窗口只负责"挑选要打开的文件"，不能再二次丢弃已经解析出来的调用：
-//! 追加到已索引文件末尾的旧日期调用、被重建来源的窗口外历史，一旦在这里
-//! 被丢弃，就会在 checkpoint 提交时随旧 generation 一起永久消失。
-
-use crate::UsageCall;
+//! 根据调用方传入的观察值和时间下界，决定来源是否需要重新读取。
 
 /// 上次成功索引某来源时记录下来的文件事实，用于判断文件是否已变化。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,12 +31,6 @@ pub fn source_file_needs_visit(
                 || checkpoint.modified_at_epoch_ms != modified_at_epoch_ms
         }
     }
-}
-
-/// 只保留发生时间不早于摄入下界的调用；下界应取派生库的永久保留窗口，
-/// 而不是本轮扫描窗口，否则窗口外的历史会在重建或追加时被永久丢弃。
-pub fn retain_ingestable_calls(calls: &mut Vec<UsageCall>, ingest_since_epoch_ms: i64) {
-    calls.retain(|call| call.occurred_at_epoch_ms >= ingest_since_epoch_ms);
 }
 
 #[cfg(test)]

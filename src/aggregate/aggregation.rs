@@ -97,9 +97,5 @@ pub fn aggregate_canonical_usage(
 }
 
 #[cfg(test)]
-#[path = "owned_segment_accounting.rs"]
-mod owned_segment_accounting;
-
-#[cfg(test)]
 #[path = "utc_day_owned_accounting.rs"]
 mod utc_day_owned_accounting;

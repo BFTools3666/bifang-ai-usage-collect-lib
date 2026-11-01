@@ -20,16 +20,6 @@ fn fixed_windows_use_expected_offsets() {
     let _ = WindowBoundaries::for_local_today(observed);
 }
 
-/// 用量查询缺省窗口是本周，不得改成概览默认的当天。
-#[test]
-fn usage_query_default_window_is_this_week() {
-    assert_eq!(
-        LocalUsageWindow::default_usage_query(),
-        LocalUsageWindow::ThisWeek
-    );
-    assert_eq!(LocalUsageWindow::default(), LocalUsageWindow::Today);
-}
-
 /// 上周日期序列长度固定为 7。
 #[test]
 fn last_week_dates_cover_seven_civil_days() {
@@ -342,8 +332,8 @@ fn local_and_remote_standards_split_the_same_instant_across_days() {
 fn ninety_day_retention_cutoff_is_earlier_than_thirty_day_window() {
     let device_tz = TimeZone::fixed(jiff::tz::offset(8));
     let observed = zoned_civil_ms(2026, 8, 19, 15, 0, 0, &device_tz);
-    let days = crate::RetentionDays::new(90).expect("90 days is approved");
-    let cutoff = retention_cutoff_epoch_ms(days, observed, &TimeStandard::Local, &device_tz)
+    let days = 90;
+    let cutoff = calendar_cutoff_epoch_ms(days, observed, &TimeStandard::Local, &device_tz)
         .expect("cutoff is representable");
     assert_eq!(cutoff, zoned_civil_ms(2026, 5, 22, 0, 0, 0, &device_tz));
     let thirty =

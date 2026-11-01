@@ -10,10 +10,10 @@ use crate::{
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
+use super::super::LocalError;
 use super::super::discovery::stable_id;
 use super::super::file_source::map_source_io_error;
 use super::super::jsonl_lines::{JsonlRecord, LineFlow, read_jsonl_records};
-use super::super::{CancellationToken, LocalError};
 
 /// Grok 会话用量独立解析语义版本；与共享来源模型声明的解析代次一致。
 pub const GROK_PARSER_VERSION: u32 = SourceClientKind::GrokBuildCli.parser_version();
@@ -214,7 +214,7 @@ pub fn parse_grok_jsonl_stream<R, F>(
     max_line_bytes: usize,
     context: &mut GrokJsonlParseContext,
     provenance: &SourceProvenance,
-    cancellation: &CancellationToken,
+    cancellation: &dyn crate::CancellationSignal,
     mut on_call: F,
 ) -> Result<GrokJsonlParseReport, LocalError>
 where

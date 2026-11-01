@@ -94,42 +94,6 @@ pub enum RootCandidateSelectionError {
     UnknownCandidate,
 }
 
-/// 数据根首次索引的激活状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RootActivationState {
-    /// 用户已确认登记，但尚未读取内容。
-    ConfirmedUnindexed,
-    /// 用户显式启动的首次或更新索引正在执行。
-    Indexing,
-    /// 已成功读到至少一条合法用量记录，可参与周期更新。
-    Ready,
-    /// 索引未读到合法记录或结构验证失败。
-    ValidationFailed,
-}
-
-impl RootActivationState {
-    /// 返回数据库使用的稳定标签。
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ConfirmedUnindexed => "confirmed_unindexed",
-            Self::Indexing => "indexing",
-            Self::Ready => "ready",
-            Self::ValidationFailed => "validation_failed",
-        }
-    }
-
-    /// 从数据库标签恢复状态，未知标签保守拒绝。
-    pub fn from_label(value: &str) -> Option<Self> {
-        match value {
-            "confirmed_unindexed" => Some(Self::ConfirmedUnindexed),
-            "indexing" => Some(Self::Indexing),
-            "ready" => Some(Self::Ready),
-            "validation_failed" => Some(Self::ValidationFailed),
-            _ => None,
-        }
-    }
-}
-
 /// 不依赖虚假百分比的发现进度计数。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RootDiscoveryProgress {

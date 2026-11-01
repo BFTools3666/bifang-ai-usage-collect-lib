@@ -3,6 +3,8 @@ mod jsonl;
 mod projects;
 use self::jsonl::{open_fixed_prefix, read_project_usage};
 use self::projects::{WorkbuddyProjectFiles, discover_project_files};
+/// 与其他来源共用宿主取消协议，保留原路径作为兼容名称。
+pub use crate::CancellationSignal as WorkbuddyCancellation;
 use crate::readers::jsonl_lines::{CancellableRead, cancelled_io_error};
 use crate::{
     WORKBUDDY_PROJECTS_DIR_NAME, WorkbuddyScanSource, WorkbuddyTraceRecord, WorkbuddyTraceStatus,
@@ -13,11 +15,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufReader, Read};
 use std::path::Path;
-/// WorkBuddy 有界遍历在每个安全循环边界查询的协作取消接口。
-pub trait WorkbuddyCancellation: Clone + Send + 'static {
-    /// 返回调用方是否已要求停止读取。
-    fn is_cancelled(&self) -> bool;
-}
 
 /// WorkBuddy trace 记录子目录固定名称。
 const WORKBUDDY_TRACES_DIR_NAME: &str = "traces";
@@ -110,7 +107,7 @@ pub fn inspect_workbuddy_project_source_with_cancellation<C>(
     cancellation: &C,
 ) -> Result<WorkbuddyProjectSourceEvidence, WorkbuddyReadError>
 where
-    C: WorkbuddyCancellation,
+    C: WorkbuddyCancellation + ?Sized,
 {
     discover_project_files(workbuddy_home, cancellation)
         .map(|files| WorkbuddyProjectSourceEvidence::from_files(&files))
@@ -131,7 +128,7 @@ pub fn read_workbuddy_usage_inputs<C>(
     cancellation: &C,
 ) -> Result<WorkbuddyUsageInputs, WorkbuddyReadError>
 where
-    C: WorkbuddyCancellation,
+    C: WorkbuddyCancellation + ?Sized,
 {
     let mut records = Vec::new();
     let mut coverages = Vec::new();
@@ -183,7 +180,7 @@ pub fn read_traces_from_sources_with_cancellation<C>(
     cancellation: &C,
 ) -> Vec<WorkbuddyTraceRecord>
 where
-    C: WorkbuddyCancellation,
+    C: WorkbuddyCancellation + ?Sized,
 {
     let mut records = Vec::new();
     for source in sources {
@@ -201,7 +198,7 @@ pub fn read_traces_with_cancellation<C>(
     cancellation: &C,
 ) -> Vec<WorkbuddyTraceRecord>
 where
-    C: WorkbuddyCancellation,
+    C: WorkbuddyCancellation + ?Sized,
 {
     if cancellation.is_cancelled() {
         return Vec::new();
@@ -270,7 +267,7 @@ pub fn sorted_entries_with_cancellation<C>(
     cancellation: &C,
 ) -> std::io::Result<Vec<fs::DirEntry>>
 where
-    C: WorkbuddyCancellation,
+    C: WorkbuddyCancellation + ?Sized,
 {
     if cancellation.is_cancelled() {
         return Err(cancelled_io_error());
@@ -297,7 +294,7 @@ pub fn read_trace_file_with_cancellation<C>(
     cancellation: &C,
 ) -> Option<(WorkbuddyTraceRecord, u64)>
 where
-    C: WorkbuddyCancellation,
+    C: WorkbuddyCancellation + ?Sized,
 {
     if cancellation.is_cancelled() {
         return None;
@@ -332,11 +329,4 @@ where
         },
         observed_len,
     ))
-}
-
-impl WorkbuddyCancellation for crate::ScanCancellation {
-    /// 复用普通来源扫描的协作取消信号。
-    fn is_cancelled(&self) -> bool {
-        crate::ScanCancellation::is_cancelled(self)
-    }
 }
