@@ -1,0 +1,5 @@
+{"sessionUpdate":"turn_started","timestamp":"2026-08-15T12:00:00Z","usage":{"inputTokens":9999,"outputTokens":9999,"totalTokens":19998},"model":"grok-in-progress"}
+{"sessionUpdate":"turn_completed","timestamp":"2026-08-15T12:00:00Z","modelUsage":{"grok-4.5-build":{"inputTokens":100,"outputTokens":40,"totalTokens":140,"cachedReadTokens":20,"cacheCreationTokens":5,"reasoningTokens":10}}}
+{"sessionUpdate":"turn_completed","timestamp":"2026-08-15T12:00:00Z","usage":{"inputTokens":50,"outputTokens":25,"totalTokens":75},"model":"grok-4.6"}
+{"update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":30,"outputTokens":15,"totalTokens":45,"cachedReadTokens":0}},"timestamp":"2026-08-15T12:00:00Z","model":"grok-4.5-build"}
+{"sessionUpdate":"turn_completed","timestamp":"2026-08-15T12:00:00Z"}

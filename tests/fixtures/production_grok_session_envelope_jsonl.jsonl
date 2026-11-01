@@ -1,0 +1,2 @@
+{"timestamp":1786891791,"method":"session/update","params":{"sessionId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","update":{"sessionUpdate":"turn_started"}}}
+{"timestamp":1786891792,"method":"session/update","params":{"sessionId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":80,"outputTokens":20,"totalTokens":100}}}}
