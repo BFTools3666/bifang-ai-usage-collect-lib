@@ -100,14 +100,32 @@ fn normalize_request(mut request: SourceFileRequest) -> Result<SourceFileRequest
     }
     #[cfg(windows)]
     reject_ambiguous_windows_components(&request.file_path)?;
-    validate_local_plain_directory(&request.root_path).map_err(map_source_io_error)?;
-    let root = fs::canonicalize(&request.root_path).map_err(map_source_io_error)?;
+    let root = canonical_source_root(&request.root_path)?;
     let comparable_root = comparable_path(&root).map_err(map_source_io_error)?;
     let comparable_file = comparable_path(&request.file_path).map_err(map_source_io_error)?;
     let relative = relative_with_platform_alias(&comparable_root, &comparable_file)?;
     request.file_path = root.join(relative);
     request.root_path = root;
     Ok(request)
+}
+
+/// 验证本地普通目录并归一化平台路径别名，供宿主派生一致的数据根身份。
+///
+/// # Errors
+/// 非绝对路径、父目录跳转、链接、网络卷或无法读取的目录返回脱敏来源错误。
+pub fn canonical_source_root(path: &Path) -> Result<PathBuf, LocalError> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(LocalError::new(
+            LocalErrorKind::InvalidPath,
+            "source root must be absolute without parent components",
+        ));
+    }
+    validate_local_plain_directory(path).map_err(map_source_io_error)?;
+    fs::canonicalize(path).map_err(map_source_io_error)
 }
 
 /// 普通 Win32 路径不能带会被 verbatim 根改变含义的尾随点或空格组件。
