@@ -1,6 +1,6 @@
 [package]
 name = "ai_usage_collect_scan"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["ManonLoki"]
@@ -12,11 +12,10 @@ publish = false
 [features]
 default = []
 test-util = []
-storage = ["dep:sea-orm", "dep:sea-orm-migration", "dep:tokio", "dep:tracing", "dep:uuid"]
+storage = ["dep:sea-orm", "dep:tokio", "dep:tracing", "dep:uuid"]
 
 [dependencies]
 sea-orm = { version = "2.0.4", optional = true, default-features = false, features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
-sea-orm-migration = { version = "2.0.4", optional = true, default-features = false, features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
 tokio = { version = "1.54.1", optional = true, default-features = false, features = ["fs"] }
 tracing = { version = "0.1.44", optional = true }
 uuid = { version = "1.29.0", optional = true, default-features = false, features = ["std", "v4"] }

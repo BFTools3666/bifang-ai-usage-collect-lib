@@ -166,6 +166,49 @@ async fn finish_background_index_roots_on<C: ConnectionTrait + ?Sized>(
     Ok(())
 }
 
+/// 在调用方事务内登记用户确认的根并移除同路径候选，重复登记保持已有启停和别名。
+pub(super) async fn register_confirmed_root_on<C: ConnectionTrait>(
+    connection: &C,
+    root_id: &str,
+    path: &Path,
+    alias: &str,
+    discovery_method: DiscoveryMethod,
+) -> Result<bool, LocalError> {
+    let result = connection.execute_raw(statement(
+        "INSERT INTO source_roots (root_id, access_path, alias, enabled, discovery_method, activation_state) VALUES (?1, ?2, ?3, 1, ?4, ?5) ON CONFLICT(root_id) DO NOTHING",
+        vec![root_id.into(), encode_path(path).into(), alias.into(), discovery_method.as_str().into(), RootActivationState::ConfirmedUnindexed.as_str().into()]
+    )).await.into_local_result()?;
+    connection
+        .execute_raw(statement(
+            "DELETE FROM discovery_candidates WHERE access_path = ?1",
+            vec![encode_path(path).into()],
+        ))
+        .await
+        .into_local_result()?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 在同一事务内重排验证失败根并读取真实激活状态。
+pub(super) async fn queue_confirmed_root_on<C: ConnectionTrait>(
+    connection: &C,
+    root_id: &str,
+) -> Result<RootActivationState, LocalError> {
+    connection.execute_raw(statement("UPDATE source_roots SET activation_state = 'confirmed_unindexed' WHERE root_id = ?1 AND enabled = 1 AND activation_state = 'validation_failed'", vec![root_id.into()])).await.into_local_result()?;
+    let label: String = connection
+        .query_one_raw(statement(
+            "SELECT activation_state FROM source_roots WHERE root_id = ?1",
+            vec![root_id.into()],
+        ))
+        .await
+        .into_local_result()?
+        .ok_or_else(|| LocalError::new(LocalErrorKind::Database, "root is not registered"))?
+        .try_get_by_index(0)
+        .into_local_result()?;
+    RootActivationState::from_label(&label).ok_or_else(|| {
+        LocalError::new(LocalErrorKind::Database, "root activation state is invalid")
+    })
+}
+
 impl LocalIndex {
     /// 原子登记根的内部访问路径；若唯一主根的同一稳定 ID 被重绑到另一物理路径，
     /// 同一事务会清除主标记，避免旧主根身份继续关联到新路径。
@@ -202,24 +245,16 @@ impl LocalIndex {
         discovery_method: DiscoveryMethod,
     ) -> Result<bool, LocalError> {
         self.validate_root_agent(root_id)?;
-        let result = self
-            .scan_connection()
-            .execute_raw(statement(
-                "INSERT INTO source_roots
-                 (root_id, access_path, alias, enabled, discovery_method, activation_state)
-                 VALUES (?1, ?2, ?3, 1, ?4, ?5)
-                 ON CONFLICT(root_id) DO NOTHING",
-                vec![
-                    root_id.into(),
-                    encode_path(path).into(),
-                    alias.into(),
-                    discovery_method.as_str().into(),
-                    RootActivationState::ConfirmedUnindexed.as_str().into(),
-                ],
-            ))
-            .await
-            .into_local_result()?;
-        Ok(result.rows_affected() > 0)
+        if let Some(transaction) = &self.active_scan_transaction {
+            register_confirmed_root_on(transaction, root_id, path, alias, discovery_method).await
+        } else {
+            let transaction = self.connection.begin().await.into_local_result()?;
+            let added =
+                register_confirmed_root_on(&transaction, root_id, path, alias, discovery_method)
+                    .await?;
+            transaction.commit().await.into_local_result()?;
+            Ok(added)
+        }
     }
 
     /// 返回全部已登记根的 `(root_id, 内部访问路径)`；仅供 adapter 在写入前做
@@ -382,28 +417,11 @@ impl LocalIndex {
         &mut self,
         root_id: &str,
     ) -> Result<RootActivationState, LocalError> {
-        self.connection
-            .execute_raw(statement(
-                "UPDATE source_roots SET activation_state = 'confirmed_unindexed'
-                 WHERE root_id = ?1 AND enabled = 1 AND activation_state = 'validation_failed'",
-                vec![root_id.into()],
-            ))
-            .await
-            .into_local_result()?;
-        let label: String = self
-            .connection
-            .query_one_raw(statement(
-                "SELECT activation_state FROM source_roots WHERE root_id = ?1",
-                vec![root_id.into()],
-            ))
-            .await
-            .into_local_result()?
-            .ok_or_else(|| LocalError::new(LocalErrorKind::Database, "root is not registered"))?
-            .try_get_by_index(0)
-            .into_local_result()?;
-        RootActivationState::from_label(&label).ok_or_else(|| {
-            LocalError::new(LocalErrorKind::Database, "root activation state is invalid")
-        })
+        if let Some(transaction) = &self.active_scan_transaction {
+            queue_confirmed_root_on(transaction, root_id).await
+        } else {
+            queue_confirmed_root_on(&self.connection, root_id).await
+        }
     }
 
     /// 原子认领本轮后台统计根，遗留 `indexing` 根也会在下轮重试。

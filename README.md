@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-ai_usage_collect_scan = { version = "0.2.0", path = "../ai_usage_collect_scan" }
+ai_usage_collect_scan = { version = "0.3.0", path = "../ai_usage_collect_scan" }
 ```
 
 包遵守目录内的商业许可证，当前 `publish = false`，没有发布到 crates.io。
@@ -20,12 +20,12 @@ ai_usage_collect_scan = { version = "0.2.0", path = "../ai_usage_collect_scan" }
 | 标准调用、累计快照、覆盖事实和通用分组统计 | 保留天数、默认查询、分页、图表和联合视图 |
 | 宿主可实现的取消检查与逐记录回调 | 回调产生的存储错误、取消结果的提交或回滚 |
 
-库不写来源文件，不包含面板、GUI 设置/账号、上传或网络传输。缺省只读；显式启用 `storage` 后提供按 Agent 分库的统计 SQLite、schema、迁移、checkpoint、来源登记和事务快照。产品视图、保留策略和调度仍由客户端负责，GUI 自身业务/设置/账号库与统计库隔离。
+库不写来源文件，不包含面板、GUI 设置/账号、上传或网络传输。缺省只读；显式启用 `storage` 后提供按 Agent 分库的统计 SQLite、新格式 schema 初始化与校验、发现候选、来源登记、扫描状态、checkpoint 和事务快照。产品视图、保留策略和调度仍由客户端负责，GUI 自身业务/设置/账号库与统计库隔离。
 
 ## 按 Agent 保存统计
 
 ```toml
-ai_usage_collect_scan = { version = "0.2.0", path = "../ai_usage_collect_scan", features = ["storage"] }
+ai_usage_collect_scan = { version = "0.3.0", path = "../ai_usage_collect_scan", features = ["storage"] }
 ```
 
 `storage::LocalIndex::open(base_dir, relative_path, client)` 要求绝对基准目录、非空相对路径和 `SourceClientKind`。例如同一基准目录分别使用 `codex.db`、`claude.db`、`grok.db`。嵌套相对目录可自动创建；拒绝绝对路径、父目录跳转、链接、WorkBuddy、错 Agent 与未知业务数据库。库不决定产品目录，也不从当前进程读取 GUI 设置；调用者提供 Tokio 运行时。
@@ -49,7 +49,9 @@ let aggregate = aggregate_canonical_usage(&canonical)?;
 
 完整文件导入分为两步：在宿主拥有的 blocking worker 中调用 `PreparedFileIndex::read(format, request, options, cancel, emit)`，随后 await `index.commit_file(prepared, cancel)`。根 ID 使用 `stable_id(client.root_id_namespace(), &path_key(&canonical_root))`。事件在提交前交付，只有返回 `true` 才已发布；取消返回 `false`，回调/解析失败无可提交结果。数据库失败回滚该文件的事实和 checkpoint，来源始终只读。重复导入以新 generation 替换旧代次，不重复累计；大文件按有限批次写入，Claude 回退质量计入扫描告警。
 
-单文件导入不证明整个根枚举完整，因此根覆盖保守记为 Partial。此便捷入口不输出来源专属增量上下文；后续 GUI 因缺少警告/上下文快照安全完整重建。需要增量索引时，使用同一 `LocalIndex` 的来源登记、checkpoint、批次写入和扫描事务原语；`begin_scan_attempt` 到发布/回滚之间，其他连接只见上次已提交结果。原迁移链和旧库桥接保留，GUI 显式传入原有相对位置，不移动已有统计数据。
+单文件导入不证明整个根枚举完整，因此根覆盖保守记为 Partial。此便捷入口不输出来源专属增量上下文；后续 GUI 因缺少警告/上下文快照安全完整重建。需要增量索引时，使用同一 `LocalIndex` 的来源登记、checkpoint、批次写入和扫描事务原语；`begin_scan_attempt` 到发布/回滚之间，其他连接只见上次已提交结果。
+
+统计存储只初始化空库或打开带当前格式标记的库，不接管旧 schema 或未知业务库。GUI 在产品数据目录下分别传入 `codex.db`、`claude.db`、`grok.db`；旧统计库不探测、不读取、不导入、不删除，由用户重新扫描建立数据。每个 Agent 库共同保存发现候选、确认根及扫描位置、扫描状态、来源 checkpoint、调用和累计快照。候选可跨连接和进程恢复，确认登记与移除候选在同一事务内完成；宿主必须先持久化本轮候选再发布发现终态，取消时保留已发现位置并保守报告覆盖。
 
 GUI 的 `gui-settings.sqlite3`、账号会话库和身份锚不属于本包；误传 GUI 业务数据库会被拒绝。保留策略、跨库联合视图和业务调度仍由客户端决定。
 
@@ -129,9 +131,11 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 
 独立项目 `ai_usage_collect_scan_ffi` 提供版本化 C ABI，`ai_usage_collect_scan_node` 通过自己的 Node-API 桥接调用它。本扫描库使用安全 Rust 提供只读获取、通用统计及可选统计存储，不包含面板或外语运行时。接口文档分别位于两个包装项目自己的 `docs/`，见 [C ABI](../ai_usage_collect_scan_ffi/docs/API.md) 和 [Node](../ai_usage_collect_scan_node/docs/API.md)。Rust Trait、`Vec`、`String` 和对象内存布局不作为外语 ABI。
 
-## 从 0.1 迁移
+## Rust API 版本变化
 
-0.2 保留面板视图、保留天数和默认查询在产品 core，第三方消费者使用通用聚合/分组函数。可选统计存储进一步共享索引四态、来源登记和 checkpoint 值对象，以及包含数据库类别的统一 `LocalError`；产品 core 重用同一类型，不再维护重复错误转换。原始解析代次和既有数据库迁移编号保持不变。
+0.2 将面板视图、保留天数和默认查询留在产品 core，第三方消费者使用通用聚合/分组函数。0.3 新增可选统计存储，共享索引四态、来源登记、checkpoint 值对象和包含数据库类别的统一 `LocalError`；产品 core 重用同一类型。
+
+0.3 将 `RootCandidate.absolute_path` 从 `String` 改为原生 `PathBuf`，消费方需同步构造和访问代码；其 `Debug` 不再输出访问路径。原始解析代次保持不变，统计数据库采用新格式，不兼容旧库。C ABI 和 Node 的请求/结果字段及版本化 wire 合同保持不变，包装项目仍独立维护版本。
 
 `test-util` feature 默认关闭，提供跨 crate 回归需要的旧增量指纹解码及存储故障注入工具；运行时上下文恢复使用各来源的 checkpoint 构造。
 

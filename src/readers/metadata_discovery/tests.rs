@@ -182,7 +182,12 @@ fn user_priority_does_not_walk_outside_priority_roots() {
     let candidates = coordinator.candidates();
     assert_eq!(candidates.len(), 1);
     assert!(candidates[0].absolute_path.ends_with(".codex"));
-    assert!(!candidates[0].absolute_path.contains("Desktop"));
+    assert!(
+        !candidates[0]
+            .absolute_path
+            .components()
+            .any(|part| part.as_os_str() == "Desktop")
+    );
 }
 
 /// 环境变量按精确根执行有界严格签名，不遍历其父目录或接受无签名目录。
@@ -572,7 +577,12 @@ fn full_discovery_skips_platform_impossible_directories() {
     );
     let candidates = coordinator.candidates();
     assert_eq!(candidates.len(), 1);
-    assert!(candidates[0].absolute_path.contains(".codex"));
+    assert!(
+        candidates[0]
+            .absolute_path
+            .components()
+            .any(|part| part.as_os_str() == ".codex")
+    );
 }
 
 /// 在隔离主目录写入带签名的默认 `.grok`，不设 `GROK_HOME`。

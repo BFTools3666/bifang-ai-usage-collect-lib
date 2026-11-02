@@ -72,19 +72,32 @@ pub enum RootCandidateEvidence {
     GrokSessionUpdates,
 }
 
-/// 发现阶段产生且只在当前进程内存活的候选。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 发现阶段产生的待确认候选，可由统计库保存并恢复。
+#[derive(Clone, PartialEq, Eq)]
 pub struct RootCandidate {
     /// 当前发现任务内稳定的临时 ID。
     pub id: String,
     /// 候选所属客户端。
     pub client: SourceClientKind,
     /// 仅供 Rust 内部验证和登记使用的完整绝对路径；不得进入 DTO 或 WebView。
-    pub absolute_path: String,
+    pub absolute_path: std::path::PathBuf,
     /// 首次发现该候选的平台策略。
     pub strategy: RootDiscoveryStrategy,
     /// 文件名与父目录结构证据。
     pub evidence: RootCandidateEvidence,
+}
+
+impl std::fmt::Debug for RootCandidate {
+    /// 诊断只包含技术身份与证据，不携带候选访问路径。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RootCandidate")
+            .field("id", &self.id)
+            .field("client", &self.client)
+            .field("strategy", &self.strategy)
+            .field("evidence", &self.evidence)
+            .finish_non_exhaustive()
+    }
 }
 
 /// 候选确认请求的稳定领域错误。
@@ -176,6 +189,10 @@ struct RootDiscoveryState {
     candidate_order: Vec<String>,
     /// 是否已请求取消；任务据此尽快停止。
     cancel_requested: bool,
+    /// 宿主尚未发布持久结果时暂缓成功或取消终态。
+    completion_deferred: bool,
+    /// 已完成发现但仍待宿主确认的实际终态。
+    pending_terminal: Option<RootDiscoveryLifecycle>,
 }
 
 impl RootDiscoveryCoordinator {
@@ -226,7 +243,39 @@ impl RootDiscoveryCoordinator {
         state.candidates.clear();
         state.candidate_order.clear();
         state.cancel_requested = false;
+        state.completion_deferred = false;
+        state.pending_terminal = None;
         true
+    }
+
+    /// 在宿主发布派生结果前保持 Running，避免消费者提前认为任务已完成。
+    pub fn defer_completion(&self) {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("root discovery state lock poisoned");
+        if state.status.lifecycle == RootDiscoveryLifecycle::Running {
+            state.completion_deferred = true;
+        }
+    }
+
+    /// 宿主完成结果发布后放行终态；存储期间收到的取消仍优先。
+    pub fn publish_completion(&self) {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("root discovery state lock poisoned");
+        if !state.completion_deferred {
+            return;
+        }
+        state.completion_deferred = false;
+        if let Some(terminal) = state.pending_terminal.take() {
+            state.status.lifecycle = if state.cancel_requested {
+                RootDiscoveryLifecycle::Cancelled
+            } else {
+                terminal
+            };
+        }
     }
 
     /// 返回当前发现任务冻结的物理 Agent 闭集。
@@ -276,7 +325,7 @@ impl RootDiscoveryCoordinator {
             .collect()
     }
 
-    /// 在全部登记成功后释放已确认候选，不持久化其临时状态。
+    /// 在宿主原子登记成功后释放当前任务的候选缓存。
     pub fn remove_candidates(&self, candidate_ids: &[String]) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         for id in candidate_ids {
@@ -336,6 +385,9 @@ impl RootDiscoveryCoordinator {
     /// 按已累计的安全计数结束任务；任何明确覆盖缺口都降级为部分完成。
     pub fn finish(&self, system_index_available: bool, fallback_performed: bool) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if state.status.lifecycle != RootDiscoveryLifecycle::Running {
+            return;
+        }
         state.status.system_index_available = system_index_available;
         state.status.fallback_performed = fallback_performed;
         state.status.lifecycle = if state.cancel_requested {
@@ -348,6 +400,10 @@ impl RootDiscoveryCoordinator {
         } else {
             RootDiscoveryLifecycle::Complete
         };
+        if state.completion_deferred {
+            state.pending_terminal = Some(state.status.lifecycle);
+            state.status.lifecycle = RootDiscoveryLifecycle::Running;
+        }
     }
 
     /// 按 adapter 的完整覆盖结论结束任务，同时以协调器计数作保守降级。
@@ -358,6 +414,9 @@ impl RootDiscoveryCoordinator {
         fallback_performed: bool,
     ) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if state.status.lifecycle != RootDiscoveryLifecycle::Running {
+            return;
+        }
         state.status.system_index_available = system_index_available;
         state.status.fallback_performed = fallback_performed;
         let has_gaps = state.status.progress.permission_denied > 0
@@ -378,11 +437,18 @@ impl RootDiscoveryCoordinator {
         {
             state.status.error_code = Some(ROOT_DISCOVERY_COVERAGE_FAILED_CODE.to_owned());
         }
+        if state.completion_deferred {
+            state.pending_terminal = Some(state.status.lifecycle);
+            state.status.lifecycle = RootDiscoveryLifecycle::Running;
+        }
     }
 
     /// 以稳定错误码结束无法继续的任务。
     pub fn fail(&self, error_code: impl Into<String>) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        state.cancel_requested = true;
+        state.completion_deferred = false;
+        state.pending_terminal = None;
         state.status.lifecycle = RootDiscoveryLifecycle::Failed;
         state.status.error_code = Some(error_code.into());
     }
@@ -561,7 +627,7 @@ mod tests {
         let candidate = RootCandidate {
             id: "candidate-a".to_owned(),
             client: SourceClientKind::Codex,
-            absolute_path: "C:/runtime-only".to_owned(),
+            absolute_path: "C:/runtime-only".into(),
             strategy: RootDiscoveryStrategy::MetadataTraversal,
             evidence: RootCandidateEvidence::CodexRollout,
         };
@@ -587,5 +653,48 @@ mod tests {
         assert!(coordinator.candidates().is_empty());
         assert!(coordinator.submit_candidate(candidate.clone()));
         assert_eq!(coordinator.candidates(), [candidate]);
+    }
+    /// 发现结束后仍等宿主持久化，期间取消和存储失败不会被成功终态覆盖。
+    #[test]
+    fn terminal_waits_for_host_publication_and_keeps_cancellation_or_failure() {
+        let coordinator = RootDiscoveryCoordinator::default();
+        assert!(coordinator.start(
+            RootDiscoveryStrategy::MetadataTraversal,
+            RootDiscoveryPlatform::Other,
+            RootDiscoveryScope::UserPriority,
+            0
+        ));
+        coordinator.defer_completion();
+        coordinator.finish(false, false);
+        assert_eq!(
+            coordinator.snapshot().lifecycle,
+            RootDiscoveryLifecycle::Running
+        );
+        assert!(coordinator.request_cancel());
+        coordinator.publish_completion();
+        assert_eq!(
+            coordinator.snapshot().lifecycle,
+            RootDiscoveryLifecycle::Cancelled
+        );
+        assert!(coordinator.start(
+            RootDiscoveryStrategy::MetadataTraversal,
+            RootDiscoveryPlatform::Other,
+            RootDiscoveryScope::UserPriority,
+            0
+        ));
+        coordinator.defer_completion();
+        coordinator.finish(false, false);
+        coordinator.fail("candidate_storage_failed");
+        coordinator.finish(false, false);
+        coordinator.finish_with_coverage(CoverageState::Cancelled, false, true);
+        coordinator.publish_completion();
+        assert_eq!(
+            coordinator.snapshot().lifecycle,
+            RootDiscoveryLifecycle::Failed
+        );
+        assert_eq!(
+            coordinator.snapshot().error_code.as_deref(),
+            Some("candidate_storage_failed")
+        );
     }
 }

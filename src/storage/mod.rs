@@ -2,28 +2,25 @@
 //!
 //! 不存储 GUI 设置、账号凭据或其他产品业务表；宿主拥有调度与运行时。
 
+mod discovery_candidates;
+pub use discovery_candidates::ConfirmedRootCandidate;
 mod file_import;
 pub use file_import::PreparedFileIndex;
 mod binding;
 mod call_store;
 mod checkpoint;
 mod error;
-mod migrator;
 mod path_codec;
-mod pre_seaorm_schema;
 mod private_sqlite;
 mod root_registry;
 mod scan_connection;
+mod schema;
 mod snapshot;
 mod snapshot_ops;
 
 use std::path::{Path, PathBuf};
 
-use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement,
-    TransactionTrait,
-};
-use sea_orm_migration::MigratorTrait;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement};
 
 pub use crate::{
     ClaudeBatchOutcome, DiscoveryMethod, LocalError, LocalErrorKind, RegisteredRoot, RootRecord,
@@ -32,10 +29,9 @@ pub use crate::{
 };
 
 #[cfg(any(test, feature = "test-util"))]
-const USAGE_INDEX_FILE_NAME: &str = "usage-index.sqlite3";
+const USAGE_INDEX_FILE_NAME: &str = "test-index.db";
 use error::IntoLocalResult;
 use error::map_database_error;
-use migrator::Migrator;
 use scan_connection::ScanConnection;
 
 use self::private_sqlite::{PrivateSqliteError, open_private_sqlite};
@@ -68,7 +64,7 @@ pub struct LocalIndex {
     /// 索引数据库文件路径。
     #[cfg_attr(not(test), allow(dead_code))]
     database_path: PathBuf,
-    /// 此连接绑定的物理 Agent；仅旧测试入口不绑定。
+    /// 此连接绑定的物理 Agent；仅测试便利入口不绑定。
     client: Option<crate::SourceClientKind>,
 }
 
@@ -108,7 +104,7 @@ impl LocalIndex {
         .await
     }
 
-    /// 为已有索引回归保留显式测试入口，不作为生产默认路径。
+    /// 为当前格式的索引回归提供显式夹具入口，不作为生产默认路径。
     #[cfg(any(test, feature = "test-util"))]
     pub async fn open_in_app_data(
         base_dir: &Path,
@@ -121,6 +117,16 @@ impl LocalIndex {
             None,
         )
         .await
+    }
+
+    /// 通过显式相对路径和解析代次建立当前格式的回归夹具。
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn open_test_at(
+        base_dir: &Path,
+        relative_path: &Path,
+        parser_version: u32,
+    ) -> Result<Self, LocalError> {
+        Self::open_internal(base_dir, relative_path, parser_version, None).await
     }
 
     /// 使用经过校验的数据库位置构造连接及扫描发布状态。
@@ -187,7 +193,7 @@ pub(crate) struct ActiveScanRecord {
     pub(crate) started_at_epoch_ms: i64,
 }
 
-/// 在指定 app-data 内打开数据库、应用连接策略并完成迁移。
+/// 在调用方指定位置初始化新格式统计库，或只读验证已有库的格式与 Agent。
 async fn open_database(
     app_data_dir: &Path,
     relative_path: &Path,
@@ -197,12 +203,14 @@ async fn open_database(
         .await
         .map_err(map_private_sqlite_error)?;
 
-    binding::validate_statistics_schema(&connection).await?;
+    if let Err(error) = schema::ensure_schema(&connection, client).await {
+        let _ = connection.close().await;
+        return Err(error);
+    }
     private_sqlite::set_private_database_permissions(&database_path)
         .await
         .map_err(map_private_sqlite_error)?;
     enable_concurrent_snapshot_reads(&connection).await?;
-    migrate_database_for_agent(&connection, client).await?;
 
     Ok((connection, database_path))
 }
@@ -233,61 +241,6 @@ async fn enable_concurrent_snapshot_reads(
         ));
     }
     Ok(())
-}
-
-/// 把旧库桥接、全部待执行 DDL/数据变换和迁移标记纳入同一事务。
-///
-/// SQLite 上的整条迁移链由存储入口显式包裹，因此继续由存储入口
-/// 显式持有唯一外层事务。任何一步失败都会先完成回滚，不会留下
-/// “表已改变但 marker 未写入”或反向的半迁移状态。
-#[cfg(test)]
-async fn migrate_database_atomically(connection: &DatabaseConnection) -> Result<(), LocalError> {
-    migrate_database_for_agent(connection, None).await
-}
-
-/// 将 Agent 绑定校验与 schema 迁移纳入同一事务。
-async fn migrate_database_for_agent(
-    connection: &DatabaseConnection,
-    client: Option<crate::SourceClientKind>,
-) -> Result<(), LocalError> {
-    let transaction = connection.begin().await.map_err(map_database_error)?;
-    let migration_result = async {
-        if let Some(client) = client {
-            binding::bind(&transaction, client).await?;
-        }
-        pre_seaorm_schema::adopt_pre_seaorm_schema_if_present(&transaction)
-            .await
-            .inspect_err(|error| {
-                tracing::error!(
-                    kind = ?error.kind(),
-                    %error,
-                    "failed to adopt legacy local index schema"
-                );
-            })?;
-        // 只在失败时记录：迁移成功（包括“已是最新版本、本次是空操作”）
-        // 每次打开数据库都会执行一遍，是高频路径，不值得按 info 级别刷屏；
-        // 失败则通常意味着数据库损坏或磁盘/权限问题，值得留痕。
-        Migrator::up(&transaction, None)
-            .await
-            .map_err(map_database_error)
-            .inspect_err(|error| {
-                tracing::error!(
-                    kind = ?error.kind(),
-                    %error,
-                    "failed to apply local index schema migrations"
-                );
-            })?;
-        Ok(())
-    }
-    .await;
-
-    match migration_result {
-        Ok(()) => transaction.commit().await.map_err(map_database_error),
-        Err(error) => {
-            transaction.rollback().await.map_err(map_database_error)?;
-            Err(error)
-        }
-    }
 }
 
 /// 把共用 SQLite 打开错误映射为本机索引稳定错误。

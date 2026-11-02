@@ -14,13 +14,13 @@ async fn rejects_invalid_app_data_directories() {
     assert_eq!(error.kind(), LocalErrorKind::InvalidPath);
 }
 
-/// 验证全新目录可以打开数据库、迁移到当前 schema，并对外暴露稳定路径。
+/// 验证全新目录可以打开数据库、初始化当前 schema，并对外暴露稳定路径。
 #[tokio::test]
 async fn opens_fresh_database_at_current_schema() {
     let temp = tempfile::tempdir().expect("temp dir is created");
     let index = LocalIndex::open_in_app_data(temp.path(), 1)
         .await
-        .expect("fresh database opens and migrates");
+        .expect("fresh database opens with current schema");
     assert_eq!(
         index.database_path(),
         temp.path().join(USAGE_INDEX_FILE_NAME)
@@ -62,7 +62,7 @@ async fn opens_fresh_database_at_current_schema() {
     }
 }
 
-/// 验证重新打开同一目录复用既有 schema，不因重复迁移报错。
+/// 验证重新打开同一目录复用既有 schema，不重复初始化表和格式标记。
 #[tokio::test]
 async fn reopening_same_directory_is_idempotent() {
     let temp = tempfile::tempdir().expect("temp dir is created");
@@ -73,7 +73,7 @@ async fn reopening_same_directory_is_idempotent() {
     }
     LocalIndex::open_in_app_data(temp.path(), 1)
         .await
-        .expect("second open reuses migrated schema");
+        .expect("second open reuses current schema");
 }
 
 /// 在活动扫描事务中写入一个完全脱敏的来源与调用夹具。
@@ -365,8 +365,8 @@ async fn cancelled_attempt_restores_pruned_usage_and_reconciled_roots() {
     );
 }
 
-/// 打开一个已经迁移完成的数据库文件用于只读检查；调用方负责先让
-/// `LocalIndex` 完成迁移并释放连接，避免和它持有的单连接池竞争。
+/// 打开一个已完成初始化的数据库文件用于只读检查；调用方负责先让
+/// `LocalIndex` 完成初始化并释放连接，避免和它持有的单连接池竞争。
 async fn reopen_for_inspection(database_path: &Path) -> sea_orm::DatabaseConnection {
     let mut options = ConnectOptions::new("sqlite://placeholder.sqlite3");
     let database_path = database_path.to_path_buf();
@@ -377,178 +377,198 @@ async fn reopen_for_inspection(database_path: &Path) -> sea_orm::DatabaseConnect
     });
     Database::connect(options)
         .await
-        .expect("migrated database reopens for inspection")
+        .expect("database reopens for inspection")
 }
 
-/// 验证元数据发现迁移会清理旧派生调用，避免旧 parser generation 混入新索引。
+/// 历史 PRAGMA、SeaORM、无标记统计库和业务库均拒绝，数据、日志与权限不变。
 #[tokio::test]
-async fn migration_rebuilds_legacy_derived_usage_calls() {
-    let temp = tempfile::tempdir().expect("temp dir is created");
-    let database_path = temp.path().join(USAGE_INDEX_FILE_NAME);
-    let fixture = reopen_for_inspection(&database_path).await;
-    fixture
-        .execute_unprepared(
-            "CREATE TABLE source_roots (
-               root_id TEXT PRIMARY KEY NOT NULL,
-               access_path BLOB NOT NULL,
-               alias TEXT NOT NULL,
-               enabled INTEGER NOT NULL,
-               discovery_method TEXT NOT NULL,
-               last_coverage_state TEXT
-             );
-             CREATE TABLE usage_calls (
-               cached_input_tokens INTEGER NOT NULL,
-               reasoning_output_tokens INTEGER NOT NULL
-             );
-             INSERT INTO usage_calls VALUES (7, 3);
-             PRAGMA user_version = 1;",
-        )
-        .await
-        .expect("v1 fixture is created");
-    drop(fixture);
-
-    LocalIndex::open_in_app_data(temp.path(), 1)
-        .await
-        .expect("v1 schema migrates");
-
-    let inspection = reopen_for_inspection(&database_path).await;
-    let count: i64 = inspection
-        .query_one_raw(sea_orm::Statement::from_string(
-            sea_orm::DbBackend::Sqlite,
-            "SELECT COUNT(*) FROM usage_calls",
-        ))
-        .await
-        .expect("migrated count query succeeds")
-        .expect("migrated count exists")
-        .try_get_by_index(0)
-        .expect("count is readable");
-    assert_eq!(count, 0);
+async fn rejects_all_legacy_and_unmarked_databases_without_modifying_them() {
+    let fixtures = [
+        schema::CREATE_SCHEMA_SQL,
+        "CREATE TABLE old_rows(value INTEGER); INSERT INTO old_rows VALUES(7); PRAGMA user_version = 1;",
+        "CREATE TABLE seaql_migrations(version TEXT PRIMARY KEY, applied_at INTEGER); INSERT INTO seaql_migrations VALUES('m1_initial', 7);",
+        "CREATE TABLE source_roots(root_id TEXT PRIMARY KEY); INSERT INTO source_roots VALUES('root-old');",
+        "CREATE TABLE gui_settings(singleton INTEGER PRIMARY KEY, payload TEXT); INSERT INTO gui_settings VALUES(1, 'private settings');",
+        "PRAGMA user_version = 1;",
+        "PRAGMA application_id = 1096110897; PRAGMA user_version = 999;",
+    ];
+    for sql in fixtures {
+        let temp = tempfile::tempdir().expect("isolated database directory");
+        let path = temp.path().join(USAGE_INDEX_FILE_NAME);
+        let connection = reopen_for_inspection(&path).await;
+        connection
+            .execute_unprepared(sql)
+            .await
+            .expect("unsupported fixture is created");
+        let before_schema = stored_schema(&connection).await;
+        let before_journal = journal_mode(&connection).await;
+        connection.close().await.expect("fixture closes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                .expect("fixture permissions broadened");
+        }
+        let before_bytes = std::fs::read(&path).expect("fixture bytes exist");
+        let error = LocalIndex::open_in_app_data(temp.path(), 1)
+            .await
+            .expect_err("unsupported database must be rejected");
+        assert_eq!(error.kind(), LocalErrorKind::UnsupportedSchema, "{sql}");
+        assert_eq!(
+            std::fs::read(&path).expect("fixture remains readable"),
+            before_bytes,
+            "{sql}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .expect("fixture metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o644
+            );
+        }
+        let inspection = reopen_for_inspection(&path).await;
+        assert_eq!(stored_schema(&inspection).await, before_schema, "{sql}");
+        assert_eq!(journal_mode(&inspection).await, before_journal, "{sql}");
+    }
 }
 
-/// 验证 v3 数据根迁移为单主根 schema：默认不隐式选择主目录，且数据库
-/// 自身的部分唯一索引与 CHECK 约束在应用代码之外仍拒绝非法状态
-/// （同时两个主根、或主根被禁用），即使有人绕过 Rust 层直接执行原始 SQL。
+/// 新格式直接包含最终列及约束，不经过旧迁移表或退役 Provider 表。
 #[tokio::test]
-async fn migrates_v3_roots_with_no_implicit_primary_and_enforces_single_enabled_primary() {
-    let temp = tempfile::tempdir().expect("temp dir is created");
-    let database_path = temp.path().join(USAGE_INDEX_FILE_NAME);
-    let fixture = reopen_for_inspection(&database_path).await;
-    fixture
-        .execute_unprepared(
-            "CREATE TABLE source_roots (
-               root_id TEXT PRIMARY KEY NOT NULL,
-               access_path BLOB NOT NULL,
-               alias TEXT NOT NULL,
-               enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
-               discovery_method TEXT NOT NULL,
-               last_coverage_state TEXT
-             );
-             CREATE TABLE source_files (
-               source_id TEXT PRIMARY KEY NOT NULL,
-               root_id TEXT NOT NULL REFERENCES source_roots(root_id) ON DELETE CASCADE,
-               relative_label TEXT NOT NULL,
-               file_identity TEXT NOT NULL,
-               archived INTEGER NOT NULL CHECK(archived IN (0, 1)),
-               observed_size INTEGER NOT NULL,
-               modified_at_epoch_ms INTEGER NOT NULL,
-               parsed_offset INTEGER NOT NULL,
-               trailing_bytes INTEGER NOT NULL,
-               oversized_tail INTEGER NOT NULL CHECK(oversized_tail IN (0, 1)),
-               parser_version INTEGER NOT NULL,
-               generation INTEGER NOT NULL,
-               ready INTEGER NOT NULL CHECK(ready IN (0, 1)),
-               thread_key TEXT NOT NULL,
-               project_key TEXT,
-               model TEXT,
-               reasoning_effort TEXT,
-               call_sequence INTEGER NOT NULL
-             );
-             CREATE TABLE usage_calls (
-               source_id TEXT NOT NULL REFERENCES source_files(source_id) ON DELETE CASCADE,
-               generation INTEGER NOT NULL,
-               logical_call_id TEXT NOT NULL,
-               occurred_at_epoch_ms INTEGER NOT NULL,
-               model TEXT,
-               reasoning_effort TEXT,
-               project_key TEXT,
-               thread_key TEXT NOT NULL,
-               input_tokens INTEGER NOT NULL,
-               cached_input_tokens INTEGER NOT NULL,
-               cache_write_input_tokens INTEGER,
-               output_tokens INTEGER NOT NULL,
-               reasoning_output_tokens INTEGER NOT NULL,
-               total_tokens INTEGER NOT NULL,
-               total_is_derived INTEGER NOT NULL CHECK(total_is_derived IN (0, 1)),
-               confidence TEXT NOT NULL,
-               cached_input_available INTEGER NOT NULL DEFAULT 1,
-               reasoning_output_available INTEGER NOT NULL DEFAULT 1,
-               adapter_consistency_key TEXT,
-               PRIMARY KEY(source_id, generation, logical_call_id)
-             );
-             CREATE TABLE scan_runs (
-               row_id INTEGER PRIMARY KEY AUTOINCREMENT,
-               scan_id TEXT UNIQUE,
-               mode TEXT NOT NULL,
-               started_at_epoch_ms INTEGER NOT NULL,
-               finished_at_epoch_ms INTEGER,
-               status TEXT NOT NULL,
-               cancelled INTEGER NOT NULL CHECK(cancelled IN (0, 1)),
-               files_scanned INTEGER NOT NULL,
-               calls_added INTEGER NOT NULL,
-               warning_count INTEGER NOT NULL
-             );
-             CREATE TABLE provider_snapshots (
-               snapshot_kind TEXT PRIMARY KEY NOT NULL,
-               observed_at_epoch_ms INTEGER NOT NULL,
-               valid_until_epoch_ms INTEGER NOT NULL,
-               normalized_json TEXT NOT NULL
-             );
-             INSERT INTO source_roots
-               (root_id, access_path, alias, enabled, discovery_method)
-             VALUES
-               ('root-a', X'01', 'A', 1, 'registered'),
-               ('root-b', X'02', 'B', 1, 'registered');
-             PRAGMA user_version = 3;",
-        )
-        .await
-        .expect("v3 fixture is created");
-    drop(fixture);
-
+async fn fresh_schema_has_final_columns_and_boolean_availability_constraints() {
+    let temp = tempfile::tempdir().expect("isolated database directory");
     let index = LocalIndex::open_in_app_data(temp.path(), 1)
         .await
-        .expect("v3 schema migrates");
-    let roots = index.list_sources().await.expect("root records load");
-    assert_eq!(roots.len(), 2);
-    assert!(roots.iter().all(|root| !root.is_primary));
-    assert!(
-        roots.iter().all(|root| {
-            root.activation_state == crate::RootActivationState::ConfirmedUnindexed
-        })
-    );
-    drop(index);
-
-    let inspection = reopen_for_inspection(&database_path).await;
-    inspection
+        .expect("new schema opens");
+    let connection = &index.connection;
+    let tables = stored_schema(connection).await;
+    assert!(!tables.contains("seaql_migrations"));
+    assert!(!tables.contains("provider_snapshots"));
+    for name in [
+        "project_label",
+        "thread_label",
+        "adapter_state",
+        "warning_counts_json",
+        "token_snapshots_ready",
+        "discovery_candidates",
+        "cached_input_available",
+        "reasoning_output_available",
+        "input_available",
+        "output_available",
+    ] {
+        assert!(tables.contains(name), "missing final field or table {name}");
+    }
+    connection.execute_unprepared("INSERT INTO source_roots(root_id, access_path, alias, enabled, discovery_method) VALUES('root-a', X'01', 'A', 1, 'registered'), ('root-b', X'02', 'B', 1, 'registered');
+        INSERT INTO source_files(source_id, root_id, relative_label, file_identity, archived, observed_size, modified_at_epoch_ms, parsed_offset, trailing_bytes, oversized_tail, parser_version, generation, ready, thread_key, call_sequence) VALUES('source-a', 'root-a', 'fixture', 'file', 0, 1, 1, 1, 0, 0, 1, 1, 1, 'thread', 1);
+        INSERT INTO usage_calls(source_id, generation, logical_call_id, occurred_at_epoch_ms, thread_key, input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, total_tokens, total_is_derived, confidence) VALUES('source-a', 1, 'call', 1, 'thread', 60, 10, 40, 20, 100, 0, 'exact');").await.expect("final schema accepts a valid fixture");
+    let row = connection.query_one_raw(Statement::from_string(DbBackend::Sqlite, "SELECT input_tokens, output_tokens, total_tokens, input_available, output_available, cached_input_available, reasoning_output_available FROM usage_calls")).await.expect("availability reads").expect("call exists");
+    assert_eq!(row.try_get_by_index::<i64>(0).unwrap(), 60);
+    assert_eq!(row.try_get_by_index::<i64>(1).unwrap(), 40);
+    assert_eq!(row.try_get_by_index::<i64>(2).unwrap(), 100);
+    for column in 3..7 {
+        assert!(row.try_get_by_index::<bool>(column).unwrap());
+    }
+    for flag in [
+        "input_available",
+        "output_available",
+        "cached_input_available",
+        "reasoning_output_available",
+    ] {
+        assert!(
+            connection
+                .execute_unprepared(&format!("UPDATE usage_calls SET {flag} = 2"))
+                .await
+                .is_err(),
+            "{flag} must be boolean"
+        );
+    }
+    connection
         .execute_unprepared("UPDATE source_roots SET is_primary = 1 WHERE root_id = 'root-a'")
         .await
-        .expect("first enabled primary is accepted");
+        .expect("first primary accepted");
     assert!(
-        inspection
+        connection
             .execute_unprepared("UPDATE source_roots SET is_primary = 1 WHERE root_id = 'root-b'")
             .await
-            .is_err(),
-        "the partial unique index must reject a second primary"
+            .is_err()
     );
     assert!(
-        inspection
+        connection
             .execute_unprepared("UPDATE source_roots SET enabled = 0 WHERE root_id = 'root-a'")
             .await
-            .is_err(),
-        "a primary root cannot remain disabled"
+            .is_err()
     );
 }
 
-/// 读取已迁移用量库中的扫描 mode，用于确认文件只含本次写入。
+/// Agent 绑定失败发生在建表和格式标记之后时，整个初始化仍回滚为空格式。
+#[tokio::test]
+async fn failed_initialization_rolls_back_tables_markers_and_binding() {
+    let temp = tempfile::tempdir().expect("isolated database directory");
+    let (connection, _) =
+        private_sqlite::open_private_sqlite(temp.path(), Path::new(USAGE_INDEX_FILE_NAME))
+            .await
+            .expect("empty database opens");
+    let error = schema::ensure_schema(&connection, Some(SourceClientKind::WorkBuddy))
+        .await
+        .expect_err("unsupported binding fails initialization");
+    assert_eq!(error.kind(), LocalErrorKind::InvalidUsage);
+    assert!(stored_schema(&connection).await.is_empty());
+    for sql in ["PRAGMA application_id", "PRAGMA user_version"] {
+        let row = connection
+            .query_one_raw(Statement::from_string(DbBackend::Sqlite, sql))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.try_get_by_index::<i64>(0).unwrap(), 0, "{sql}");
+    }
+    schema::ensure_schema(&connection, Some(SourceClientKind::Codex))
+        .await
+        .expect("retry initializes complete fresh schema");
+    let row = connection
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT agent FROM usage_agent WHERE singleton = 1",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get_by_index::<String>(0).unwrap(), "codex");
+}
+
+/// 返回数据库完整 schema 文本，用于证明拒绝操作没有添加或修改对象。
+async fn stored_schema(connection: &sea_orm::DatabaseConnection) -> String {
+    connection
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name",
+        ))
+        .await
+        .expect("schema reads")
+        .into_iter()
+        .map(|row| row.try_get_by_index::<String>(0).expect("schema text"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 读取日志模式，验证旧库拒绝发生在 WAL 写入之前。
+async fn journal_mode(connection: &sea_orm::DatabaseConnection) -> String {
+    connection
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA journal_mode",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap()
+}
+
+/// 读取当前格式用量库中的扫描 mode，用于确认文件只含本次写入。
 async fn scan_modes(database_path: &Path) -> Vec<String> {
     let inspection = reopen_for_inspection(database_path).await;
     let rows = inspection

@@ -715,11 +715,11 @@ fn submit_candidate(
     if !agents.contains(client) {
         return;
     }
-    let key = path.to_string_lossy().to_string();
+    let key = crate::path_key(&path);
     let candidate = RootCandidate {
         id: stable_id(client.candidate_namespace(), &key),
         client,
-        absolute_path: key,
+        absolute_path: path,
         strategy,
         evidence,
     };

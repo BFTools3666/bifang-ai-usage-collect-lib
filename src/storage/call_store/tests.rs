@@ -5,42 +5,18 @@ use super::shared::statement;
 use super::*;
 use crate::{Confidence, TokenUsage, UsageCall};
 
-/// 创建只含调用表的内存 schema，隔离验证批次事务与冲突语义。
+/// 使用当前完整 schema 隔离批次事务；本组无来源夹具，显式关闭外键检查。
 async fn test_connection() -> DatabaseConnection {
-    let connection = Database::connect(ConnectOptions::new("sqlite::memory:"))
+    let mut options = ConnectOptions::new("sqlite::memory:");
+    options
+        .max_connections(1)
+        .map_sqlx_sqlite_opts(|sqlite| sqlite.foreign_keys(false));
+    let connection = Database::connect(options)
         .await
         .expect("in-memory database opens");
-    connection
-        .execute_unprepared(
-            "CREATE TABLE usage_calls (
-               source_id TEXT NOT NULL,
-               generation INTEGER NOT NULL,
-               logical_call_id TEXT NOT NULL,
-               occurred_at_epoch_ms INTEGER NOT NULL,
-               model TEXT,
-               reasoning_effort TEXT,
-               project_key TEXT,
-               thread_key TEXT NOT NULL,
-               project_label TEXT,
-               thread_label TEXT,
-               input_tokens INTEGER NOT NULL,
-               cached_input_tokens INTEGER NOT NULL,
-               cache_write_input_tokens INTEGER,
-               output_tokens INTEGER NOT NULL,
-               reasoning_output_tokens INTEGER NOT NULL,
-               total_tokens INTEGER NOT NULL,
-               total_is_derived INTEGER NOT NULL,
-               confidence TEXT NOT NULL,
-               cached_input_available INTEGER NOT NULL,
-               input_available INTEGER NOT NULL,
-               output_available INTEGER NOT NULL,
-               reasoning_output_available INTEGER NOT NULL,
-               adapter_consistency_key TEXT,
-               PRIMARY KEY(source_id, generation, logical_call_id)
-             );",
-        )
+    crate::storage::schema::ensure_schema(&connection, None)
         .await
-        .expect("usage call schema is created");
+        .expect("current statistics schema initializes");
     connection
 }
 
