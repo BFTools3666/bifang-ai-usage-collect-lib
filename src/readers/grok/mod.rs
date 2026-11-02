@@ -8,4 +8,6 @@ pub use discovery::{
 };
 pub mod enumerate;
 #[cfg(test)]
+mod jsonl_identity_tests;
+#[cfg(test)]
 mod jsonl_tests;

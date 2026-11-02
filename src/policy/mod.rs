@@ -77,7 +77,7 @@ impl SourceClientKind {
         match self {
             Self::Codex => 10,
             Self::ClaudeCode => 6,
-            Self::GrokBuildCli => 5,
+            Self::GrokBuildCli => 6,
             Self::WorkBuddy => 1,
         }
     }

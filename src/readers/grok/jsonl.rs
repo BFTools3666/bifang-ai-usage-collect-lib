@@ -331,19 +331,28 @@ fn envelope_occurred_at_epoch_ms(record: &Envelope, payload: &Envelope) -> Optio
         .or_else(|| parse_rfc3339(payload.created_at.as_deref()))
 }
 
-/// 从数字或字符串 JSON 值解析毫秒时间戳。
+/// 从数字或字符串解析受 Jiff 范围约束的时间；有限小数保持既有向零取整兼容。
 fn parse_json_timestamp(value: Option<&serde_json::Value>) -> Option<i64> {
     match value? {
         serde_json::Value::String(text) => parse_rfc3339(Some(text)),
         serde_json::Value::Number(number) => {
-            let raw = number
-                .as_i64()
-                .or_else(|| number.as_f64().map(|value| value as i64))?;
-            Some(if raw.abs() >= 1_000_000_000_000 {
+            let raw = number.as_i64().or_else(|| {
+                let value = number.as_f64()?;
+                // i64::MAX 转 f64 后等于 2^63，因此上界必须排除，避免转换时夹紧。
+                if value.is_finite() && value >= i64::MIN as f64 && value < -(i64::MIN as f64) {
+                    Some(value as i64)
+                } else {
+                    None
+                }
+            })?;
+            let milliseconds = if raw.unsigned_abs() >= 1_000_000_000_000 {
                 raw
             } else {
-                raw.saturating_mul(1_000)
-            })
+                raw.checked_mul(1_000)?
+            };
+            Timestamp::from_millisecond(milliseconds)
+                .ok()
+                .map(|_| milliseconds)
         }
         _ => None,
     }
@@ -384,7 +393,11 @@ fn parse_line(
     let model_usage = completed_model_usage(payload);
     let fallback_usage = payload.usage.clone();
     let fallback_model = payload.model.clone();
-    let turn_id = payload.turn_id.as_deref().or(payload.id.as_deref());
+    let turn_id = payload
+        .turn_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .or(payload.id.as_deref().filter(|id| !id.is_empty()));
     let mut calls = Vec::new();
     if !model_usage.is_empty() {
         for (model, usage) in model_usage {
@@ -445,12 +458,18 @@ fn to_call(
         crate::TokenUsageError::MissingTotalTokens => LineOutcome::MissingUsage,
         _ => LineOutcome::InvalidUsage,
     })?;
-    let identity = format!(
-        "{}\u{0}{}\u{0}{}\u{0}{turn_sequence}",
-        context.thread_key,
-        turn_id.unwrap_or(""),
-        model.unwrap_or("")
-    );
+    let identity = match turn_id {
+        Some(id) => format!(
+            "{}\u{0}turn\u{0}{id}\u{0}{}",
+            context.thread_key,
+            model.unwrap_or("")
+        ),
+        None => format!(
+            "{}\u{0}sequence\u{0}{turn_sequence}\u{0}{}",
+            context.thread_key,
+            model.unwrap_or("")
+        ),
+    };
     Ok(UsageCall {
         logical_call_id: stable_id("grok-call", &identity),
         occurred_at_epoch_ms,
