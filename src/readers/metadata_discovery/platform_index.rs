@@ -63,7 +63,7 @@ pub(super) fn query(
         else {
             continue;
         };
-        let Ok(folder) = folder_operation.get() else {
+        let Ok(folder) = folder_operation.join() else {
             continue;
         };
         let Ok(query) = folder.CreateFileQueryWithOptions(&options) else {
@@ -74,7 +74,7 @@ pub(super) fn query(
             let Ok(operation) = query.GetFilesAsync(offset, 512) else {
                 break;
             };
-            let Ok(files) = operation.get() else {
+            let Ok(files) = operation.join() else {
                 break;
             };
             any_query_succeeded = true;
