@@ -66,6 +66,54 @@ pub(crate) async fn load_usage_snapshot_since(
     })
 }
 
+/// 用同一只读事务取得调用与累计快照，避免两次查询之间混入另一代提交。
+pub(super) async fn load_canonical_snapshot(
+    connection: &sea_orm::DatabaseConnection,
+    parser_version: u32,
+) -> Result<CanonicalUsageSet, LocalError> {
+    let transaction = connection.begin().await.into_local_result()?;
+    let canonical = load_canonical_calls(&transaction, parser_version).await?;
+    transaction.commit().await.into_local_result()?;
+    Ok(canonical)
+}
+
+/// 在一个有界只读事务内取得索引状态，不装载完整调用集合。
+pub(super) async fn load_index_state(
+    connection: &sea_orm::DatabaseConnection,
+    parser_version: u32,
+) -> Result<LocalIndexState, LocalError> {
+    let transaction = connection.begin().await.into_local_result()?;
+    let has_usage = has_current_parser_usage(&transaction, parser_version).await?;
+    #[cfg(test)]
+    super::read_snapshot_tests::pause_after_index_usage_query().await;
+    let state =
+        load_local_index_state(&transaction, usize::from(has_usage), parser_version).await?;
+    transaction.commit().await.into_local_result()?;
+    Ok(state)
+}
+
+/// 从调用方当前连接或事务读取是否已有当前解析代次的可展示事实。
+pub(super) async fn has_current_parser_usage<C: ConnectionTrait>(
+    connection: &C,
+    parser_version: u32,
+) -> Result<bool, LocalError> {
+    let row = connection
+        .query_one_raw(statement(
+            "SELECT
+           EXISTS(SELECT 1 FROM usage_calls u
+             JOIN source_files f ON f.source_id = u.source_id
+             WHERE f.parser_version = ?1 AND f.ready = 1 AND f.generation = u.generation)
+           OR EXISTS(SELECT 1 FROM usage_token_snapshots s
+             JOIN source_files f ON f.source_id = s.source_id
+             WHERE f.parser_version = ?1 AND f.ready = 1 AND f.generation = s.generation)",
+            vec![i64::from(parser_version).into()],
+        ))
+        .await
+        .into_local_result()?
+        .ok_or_else(|| LocalError::new(LocalErrorKind::Database, "usage state is unreadable"))?;
+    Ok(row.try_get_by_index::<i64>(0).into_local_result()? != 0)
+}
+
 /// 从当前数据库快照推导索引四态，旧 parser 来源优先暴露为需要重扫。
 pub(super) async fn load_local_index_state<C: ConnectionTrait>(
     connection: &C,
@@ -214,6 +262,8 @@ pub(crate) async fn load_canonical_calls_since<C: ConnectionTrait>(
         ))
         .await
         .into_local_result()?;
+    #[cfg(test)]
+    super::read_snapshot_tests::pause_after_calls_query().await;
     let mut calls = Vec::with_capacity(rows.len());
     for row in &rows {
         calls.push(row_to_usage_call(row)?);

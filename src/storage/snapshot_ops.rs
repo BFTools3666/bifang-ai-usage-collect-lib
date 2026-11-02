@@ -206,42 +206,34 @@ pub(super) async fn resolve_scan_commit_error<C: ConnectionTrait + ?Sized>(
 impl LocalIndex {
     /// 返回当前 parser generation 是否已经存在可展示的派生用量。
     pub async fn has_current_parser_usage(&self) -> Result<bool, LocalError> {
-        let row = self
-            .scan_connection()
-            .query_one_raw(statement(
-                "SELECT
-                   EXISTS(
-                     SELECT 1 FROM usage_calls u
-                     JOIN source_files f ON f.source_id = u.source_id
-                     WHERE f.parser_version = ?1 AND f.ready = 1
-                       AND f.generation = u.generation
-                   )
-                   OR EXISTS(
-                     SELECT 1 FROM usage_token_snapshots s
-                     JOIN source_files f ON f.source_id = s.source_id
-                     WHERE f.parser_version = ?1 AND f.ready = 1
-                       AND f.generation = s.generation
-                   )",
-                vec![i64::from(self.parser_version).into()],
-            ))
-            .await
-            .into_local_result()?
-            .ok_or_else(|| {
-                LocalError::new(LocalErrorKind::Database, "usage state is unreadable")
-            })?;
-        Ok(row.try_get_by_index::<i64>(0).into_local_result()? != 0)
+        match self.active_scan_transaction.as_ref() {
+            Some(transaction) => {
+                super::snapshot::has_current_parser_usage(transaction, self.parser_version).await
+            }
+            None => {
+                super::snapshot::has_current_parser_usage(&self.connection, self.parser_version)
+                    .await
+            }
+        }
     }
 
-    /// 只用有界计数与 EXISTS 查询读取索引四态，不装载全部 canonical 调用。
+    /// 只用同一快照内的有界计数读取已发布索引四态，不装载完整调用。
+    /// # Errors
+    /// 同一实例持有未发布扫描时立即返回 `ScanBusy`，避免等待自己的唯一连接。
     pub async fn index_state(&self) -> Result<LocalIndexState, LocalError> {
-        let canonical_call_count =
-            usize::from(self.has_current_parser_usage().await.into_local_result()?);
-        super::snapshot::load_local_index_state(
-            &self.connection,
-            canonical_call_count,
-            self.parser_version,
-        )
-        .await
+        self.ensure_published_read()?;
+        super::snapshot::load_index_state(&self.connection, self.parser_version).await
+    }
+
+    /// 已发布视图不得与同一实例的扫描写事务争用唯一连接。
+    fn ensure_published_read(&self) -> Result<(), LocalError> {
+        if self.active_scan_transaction.is_some() {
+            return Err(LocalError::new(
+                LocalErrorKind::ScanBusy,
+                "published snapshot is unavailable during an active scan",
+            ));
+        }
+        Ok(())
     }
 
     /// 删除保留窗口以前的派生调用与累计快照，保留根和来源 checkpoint。
@@ -400,27 +392,36 @@ impl LocalIndex {
         let canonical = if let Some(transaction) = &self.active_scan_transaction {
             load_canonical_calls(transaction, self.parser_version).await?
         } else {
-            load_canonical_calls(&self.connection, self.parser_version).await?
+            self.canonical_calls().await?
         }
         .with_total_token_accounting(provider.local_total_token_accounting());
         aggregate_canonical_usage(&canonical).map_err(LocalError::from)
     }
 
-    /// 读取所有当前 generation 的观察并由 core 执行 canonical 去重。
+    /// 在同一只读事务内读取已发布调用与累计快照，并执行 canonical 去重。
+    /// # Errors
+    /// 同一实例持有未发布扫描时立即返回 `ScanBusy`，存储错误保持原稳定类别。
     pub async fn canonical_calls(&self) -> Result<CanonicalUsageSet, LocalError> {
-        load_canonical_calls(&self.connection, self.parser_version).await
+        self.ensure_published_read()?;
+        super::snapshot::load_canonical_snapshot(&self.connection, self.parser_version).await
     }
 
-    /// 在一个只读快照事务中取得统计所需调用与根记录，不触发扫描或写入。
+    /// 在一个只读快照事务中取得已发布调用与根记录，不触发扫描或写入。
+    /// # Errors
+    /// 同一实例持有未发布扫描时立即返回 `ScanBusy`，其他存储失败返回稳定错误。
     pub async fn usage_snapshot(&mut self) -> Result<UsageSnapshot, LocalError> {
+        self.ensure_published_read()?;
         load_usage_snapshot(&self.connection, self.parser_version).await
     }
 
-    /// 在一个事务中只装载给定时间下界后的调用，供 30 日视图读取使用。
+    /// 在一个只读事务中只装载给定时间下界后的已发布调用。
+    /// # Errors
+    /// 同一实例持有未发布扫描时立即返回 `ScanBusy`，其他存储失败返回稳定错误。
     pub async fn usage_snapshot_since(
         &mut self,
         cutoff_epoch_ms: i64,
     ) -> Result<UsageSnapshot, LocalError> {
+        self.ensure_published_read()?;
         load_usage_snapshot_since(&self.connection, self.parser_version, cutoff_epoch_ms).await
     }
 

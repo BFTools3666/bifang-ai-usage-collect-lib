@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "ai_usage_collect_scan"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "jiff",
  "objc2-foundation",

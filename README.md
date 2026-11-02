@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-ai_usage_collect_scan = { version = "0.3.0", path = "../ai_usage_collect_scan" }
+ai_usage_collect_scan = { version = "0.3.1", path = "../ai_usage_collect_scan" }
 ```
 
 包遵守目录内的商业许可证，当前 `publish = false`，没有发布到 crates.io。
@@ -25,7 +25,7 @@ ai_usage_collect_scan = { version = "0.3.0", path = "../ai_usage_collect_scan" }
 ## 按 Agent 保存统计
 
 ```toml
-ai_usage_collect_scan = { version = "0.3.0", path = "../ai_usage_collect_scan", features = ["storage"] }
+ai_usage_collect_scan = { version = "0.3.1", path = "../ai_usage_collect_scan", features = ["storage"] }
 ```
 
 `storage::LocalIndex::open(base_dir, relative_path, client)` 要求绝对基准目录、非空相对路径和 `SourceClientKind`。例如同一基准目录分别使用 `codex.db`、`claude.db`、`grok.db`。嵌套相对目录可自动创建；拒绝绝对路径、父目录跳转、链接、WorkBuddy、错 Agent 与未知业务数据库。库不决定产品目录，也不从当前进程读取 GUI 设置；调用者提供 Tokio 运行时。
@@ -136,6 +136,8 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 0.2 将面板视图、保留天数和默认查询留在产品 core，第三方消费者使用通用聚合/分组函数。0.3 新增可选统计存储，共享索引四态、来源登记、checkpoint 值对象和包含数据库类别的统一 `LocalError`；产品 core 重用同一类型。
 
 0.3 将 `RootCandidate.absolute_path` 从 `String` 改为原生 `PathBuf`，消费方需同步构造和访问代码；其 `Debug` 不再输出访问路径。原始解析代次保持不变，统计数据库采用新格式，不兼容旧库。C ABI 和 Node 的请求/结果字段及版本化 wire 合同保持不变，包装项目仍独立维护版本。
+
+公开 `canonical_calls`、`usage_snapshot`、`usage_snapshot_since`、`index_state` 和普通聚合只读取已发布状态；调用与累计快照、索引存在性与状态计数分别在同一只读事务中取得。同一 `LocalIndex` 正持有未发布扫描事务时，这些入口立即返回 `LocalErrorKind::ScanBusy`，不等待自己占用的唯一连接。扫描内部策略继续使用 `has_current_parser_usage`，扫描摘要使用 `aggregate_active_scan_for_provider` 读取本事务暂存事实。需要并发读取上次发布结果时，另开同一数据库的 `LocalIndex` 即可。
 
 `test-util` feature 默认关闭，提供跨 crate 回归需要的旧增量指纹解码及存储故障注入工具；运行时上下文恢复使用各来源的 checkpoint 构造。
 
