@@ -121,9 +121,21 @@ pub fn read_usage_file(
     cancellation: &dyn CancellationSignal,
     emit: &mut UsageEmitter<'_>,
 ) -> Result<UsageReadReport, LocalError> {
+    read_usage_file_observed(format, request, options, cancellation, emit).map(|(report, _)| report)
+}
+
+/// 为统计存储保留同一次打开的来源观察，原生种子不跨公开协议。
+#[cfg_attr(not(feature = "storage"), allow(dead_code))]
+pub(crate) fn read_usage_file_observed(
+    format: JsonlFormat,
+    request: SourceFileRequest,
+    options: UsageReadOptions,
+    cancellation: &dyn CancellationSignal,
+    emit: &mut UsageEmitter<'_>,
+) -> Result<(UsageReadReport, Option<super::UsageFileMetadata>), LocalError> {
     let parser = format.descriptor();
     if cancellation.is_cancelled() {
-        return Ok(UsageReadReport::cancelled(parser));
+        return Ok((UsageReadReport::cancelled(parser), None));
     }
     let request = super::normalize_request(request)?;
     let opened = match format {
@@ -133,7 +145,9 @@ pub fn read_usage_file(
                 RolloutProbeBudget::new(1, jsonl::ROLLOUT_SIGNATURE_MAX_BYTES.saturating_add(1));
             match inspect_rollout_file(&request.file_path, cancellation, &mut budget) {
                 RolloutFileInspection::Matched(source) => open_rollout_source(source, request)?,
-                RolloutFileInspection::Cancelled => return Ok(UsageReadReport::cancelled(parser)),
+                RolloutFileInspection::Cancelled => {
+                    return Ok((UsageReadReport::cancelled(parser), None));
+                }
                 RolloutFileInspection::Rejected => {
                     return Err(LocalError::new(
                         LocalErrorKind::InvalidPath,
@@ -151,7 +165,8 @@ pub fn read_usage_file(
         JsonlFormat::Claude => open_claude_source(request)?,
         JsonlFormat::Grok => open_grok_source(request)?,
     };
-    read_opened(format, opened, options, cancellation, emit)
+    let metadata = opened.metadata().clone();
+    read_opened(format, opened, options, cancellation, emit).map(|report| (report, Some(metadata)))
 }
 
 /// 读取已经校验的同一文件句柄，并将来源报告投影成通用 wire 值。

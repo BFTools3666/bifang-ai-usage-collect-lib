@@ -1,4 +1,4 @@
-//! AI 用量的只读扫描、解析、规范化与统计；持久化由调用客户端负责。
+//! AI 用量的只读扫描、解析、统计与可选的按 Agent 分库持久化。
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 
@@ -82,8 +82,11 @@ mod cancellation;
 pub use cancellation::{CancellationSignal, ScanCancellation};
 mod local_index;
 pub use local_index::{
-    DiscoveryMethod, LocalError, LocalErrorKind, RegisteredRoot, SourceParseCheckpoint, path_key,
-    stable_id,
+    ClaudeBatchOutcome, CodexCallWriteDecision, DiscoveryMethod, IndexedTokenUsage, LocalError,
+    LocalErrorKind, LocalIndexState, RegisteredRoot, RootActivationState, RootRecord,
+    SourceParseCheckpoint, StoredSourceFile, UsageSnapshot, claude_usage_observation_is_monotonic,
+    codex_call_write_decision, coverage_state_from_label, coverage_state_label,
+    local_index_state_from_facts, path_key, stable_id,
 };
 
 /// 本机文件的只读发现、枚举和解析接口。
@@ -108,3 +111,7 @@ pub mod parsing;
 
 /// 经路径验证的只读文件打开与来源观察。
 pub mod input;
+
+/// 按 Agent 隔离的可选 SQLite 统计存储；GUI 设置及账号数据由调用者持有。
+#[cfg(feature = "storage")]
+pub mod storage;

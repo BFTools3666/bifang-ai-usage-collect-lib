@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["ManonLoki"]
-description = "只读 AI 用量扫描、JSONL 解析与统计；存储由客户端实现"
+description = "只读 AI 用量扫描、JSONL 解析、统计与可选的按 Agent 分库持久化"
 license-file = "LICENSE.zh-CN.md"
 readme = "README.md"
 publish = false
@@ -12,8 +12,14 @@ publish = false
 [features]
 default = []
 test-util = []
+storage = ["dep:sea-orm", "dep:sea-orm-migration", "dep:tokio", "dep:tracing", "dep:uuid"]
 
 [dependencies]
+sea-orm = { version = "2.0.4", optional = true, default-features = false, features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
+sea-orm-migration = { version = "2.0.4", optional = true, default-features = false, features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
+tokio = { version = "1.54.1", optional = true, default-features = false, features = ["fs"] }
+tracing = { version = "0.1.44", optional = true }
+uuid = { version = "1.29.0", optional = true, default-features = false, features = ["std", "v4"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
@@ -28,6 +34,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 windows = { version = "0.62.2", default-features = false, features = ["Foundation", "Storage", "Storage_Search", "Storage_Streams"] }
 
 [dev-dependencies]
+tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tempfile = "3.27.0"
 
 [lints.rust]

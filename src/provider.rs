@@ -36,6 +36,17 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    /// 返回本机统计来源对应的 Agent 身份。
+    pub const fn source_client(self) -> Option<crate::SourceClientKind> {
+        match self {
+            Self::RolloutJsonl => Some(crate::SourceClientKind::Codex),
+            Self::ClaudeTranscriptJsonl => Some(crate::SourceClientKind::ClaudeCode),
+            Self::GrokSessionJsonl => Some(crate::SourceClientKind::GrokBuildCli),
+            Self::WorkbuddyProjectJsonl => Some(crate::SourceClientKind::WorkBuddy),
+            Self::CombinedLocalAgents => None,
+        }
+    }
+
     /// 返回本 provider 的本机调用总 Token 聚合口径。
     pub const fn local_total_token_accounting(self) -> TotalTokenAccounting {
         match self {

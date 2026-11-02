@@ -436,3 +436,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(feature = "storage")]
+pub(crate) use read::read_usage_file_observed;

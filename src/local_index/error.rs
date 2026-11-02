@@ -14,6 +14,12 @@ pub enum LocalErrorKind {
     PermissionDenied,
     /// 只读来源在扫描期间消失或无法打开。
     SourceUnavailable,
+    /// 数据库 schema 比当前版本新，停止写入。
+    UnsupportedSchema,
+    /// 统计数据库初始化、事务或查询失败。
+    Database,
+    /// 同一连接已有扫描写事务。
+    ScanBusy,
     /// Token 字段违反共享用量模型的不变量。
     InvalidUsage,
     /// 内部计数或偏移无法安全表示。

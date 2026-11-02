@@ -16,11 +16,42 @@ ai_usage_collect_scan = { version = "0.2.0", path = "../ai_usage_collect_scan" }
 | 本包提供 | 消费应用负责 |
 | --- | --- |
 | 来源发现、获批准目录的枚举与只读打开 | 启用哪些来源、任务调度、线程与进度展示 |
-| 流式解析、用量校验、完整行检查点和来源报告 | 检查点持久化、增量重建、数据库与事务 |
+| 流式解析、用量校验、完整行检查点、来源报告及可选统计持久化 | 选择统计库保存路径、增量重建和调度 |
 | 标准调用、累计快照、覆盖事实和通用分组统计 | 保留天数、默认查询、分页、图表和联合视图 |
 | 宿主可实现的取消检查与逐记录回调 | 回调产生的存储错误、取消结果的提交或回滚 |
 
-库不写来源文件，不建立数据库，不包含面板、账号、上传或网络传输。产品的视图模型和存储策略位于 `ai_usage_collect_core`，SQLite 驱动和运行时装配位于 GUI backend。
+库不写来源文件，不包含面板、GUI 设置/账号、上传或网络传输。缺省只读；显式启用 `storage` 后提供按 Agent 分库的统计 SQLite、schema、迁移、checkpoint、来源登记和事务快照。产品视图、保留策略和调度仍由客户端负责，GUI 自身业务/设置/账号库与统计库隔离。
+
+## 按 Agent 保存统计
+
+```toml
+ai_usage_collect_scan = { version = "0.2.0", path = "../ai_usage_collect_scan", features = ["storage"] }
+```
+
+`storage::LocalIndex::open(base_dir, relative_path, client)` 要求绝对基准目录、非空相对路径和 `SourceClientKind`。例如同一基准目录分别使用 `codex.db`、`claude.db`、`grok.db`。嵌套相对目录可自动创建；拒绝绝对路径、父目录跳转、链接、WorkBuddy、错 Agent 与未知业务数据库。库不决定产品目录，也不从当前进程读取 GUI 设置；调用者提供 Tokio 运行时。
+
+```rust,no_run
+# #[cfg(feature = "storage")]
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use std::path::Path;
+use ai_usage_collect_scan::{SourceClientKind, aggregate_canonical_usage};
+use ai_usage_collect_scan::storage::LocalIndex;
+let index = LocalIndex::open(
+    Path::new("/application/statistics"), Path::new("codex.db"), SourceClientKind::Codex,
+).await?;
+let canonical = index.canonical_calls().await?;
+let aggregate = aggregate_canonical_usage(&canonical)?;
+# let _ = aggregate;
+# Ok(())
+# }
+# fn main() {}
+```
+
+完整文件导入分为两步：在宿主拥有的 blocking worker 中调用 `PreparedFileIndex::read(format, request, options, cancel, emit)`，随后 await `index.commit_file(prepared, cancel)`。根 ID 使用 `stable_id(client.root_id_namespace(), &path_key(&canonical_root))`。事件在提交前交付，只有返回 `true` 才已发布；取消返回 `false`，回调/解析失败无可提交结果。数据库失败回滚该文件的事实和 checkpoint，来源始终只读。重复导入以新 generation 替换旧代次，不重复累计；大文件按有限批次写入，Claude 回退质量计入扫描告警。
+
+单文件导入不证明整个根枚举完整，因此根覆盖保守记为 Partial。此便捷入口不输出来源专属增量上下文；后续 GUI 因缺少警告/上下文快照安全完整重建。需要增量索引时，使用同一 `LocalIndex` 的来源登记、checkpoint、批次写入和扫描事务原语；`begin_scan_attempt` 到发布/回滚之间，其他连接只见上次已提交结果。原迁移链和旧库桥接保留，GUI 显式传入原有相对位置，不移动已有统计数据。
+
+GUI 的 `gui-settings.sqlite3`、账号会话库和身份锚不属于本包；误传 GUI 业务数据库会被拒绝。保留策略、跨库联合视图和业务调度仍由客户端决定。
 
 ## 单文件读取
 
@@ -96,13 +127,13 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 
 ## FFI 与 Node 接入
 
-独立项目 `ai_usage_collect_scan_ffi` 提供版本化 C ABI，`ai_usage_collect_scan_node` 通过自己的 Node-API 桥接调用它。本扫描库仍保持安全 Rust 的只读获取和通用统计职责，不增加存储、面板或外语运行时。接口文档分别位于两个包装项目自己的 `docs/`，见 [C ABI](../ai_usage_collect_scan_ffi/docs/API.md) 和 [Node](../ai_usage_collect_scan_node/docs/API.md)。Rust Trait、`Vec`、`String` 和对象内存布局不作为外语 ABI。
+独立项目 `ai_usage_collect_scan_ffi` 提供版本化 C ABI，`ai_usage_collect_scan_node` 通过自己的 Node-API 桥接调用它。本扫描库使用安全 Rust 提供只读获取、通用统计及可选统计存储，不包含面板或外语运行时。接口文档分别位于两个包装项目自己的 `docs/`，见 [C ABI](../ai_usage_collect_scan_ffi/docs/API.md) 和 [Node](../ai_usage_collect_scan_node/docs/API.md)。Rust Trait、`Vec`、`String` 和对象内存布局不作为外语 ABI。
 
 ## 从 0.1 迁移
 
-0.2 是独立包的 API 边界调整：面板视图、保留天数、默认查询、索引状态以及数据库错误类型移回产品 core；第三方消费者改用通用聚合/分组函数。读取错误现在只包含来源和解析类别，产品通过 `From<ai_usage_collect_scan::LocalError>` 映射自身错误。原始解析代次和检查点格式保持不变。
+0.2 保留面板视图、保留天数和默认查询在产品 core，第三方消费者使用通用聚合/分组函数。可选统计存储进一步共享索引四态、来源登记和 checkpoint 值对象，以及包含数据库类别的统一 `LocalError`；产品 core 重用同一类型，不再维护重复错误转换。原始解析代次和既有数据库迁移编号保持不变。
 
-`test-util` feature 默认关闭，仅提供跨 crate 回归需要的旧增量指纹解码工具；运行时上下文恢复使用各来源的 checkpoint 构造。
+`test-util` feature 默认关闭，提供跨 crate 回归需要的旧增量指纹解码及存储故障注入工具；运行时上下文恢复使用各来源的 checkpoint 构造。
 
 ## 测试
 
