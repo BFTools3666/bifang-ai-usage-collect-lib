@@ -329,6 +329,10 @@ fn parse_line(
         Some(usage) => usage,
         None => return LineOutcome::Ignored,
     };
+    // GLM 只接受上游直接给出的总量，不能使用共享构造器的输入/输出推算回退。
+    if usage.total_tokens.is_none() {
+        return LineOutcome::MissingUsage;
+    }
     let usage = match TokenUsage::new_with_component_availability(
         usage.input_tokens,
         usage.cache_read_tokens,

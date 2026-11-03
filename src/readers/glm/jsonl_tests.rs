@@ -124,6 +124,19 @@ fn usage_without_total_counts_missing_usage() {
     assert_eq!(report.warnings.missing_usage, 1);
 }
 
+/// 即使输入与输出齐全，也不能推算缺失的上游总量或生成调用。
+#[test]
+fn input_and_output_without_total_do_not_emit_derived_usage() {
+    let jsonl = concat!(
+        "{\"type\":\"model_io\",\"sessionId\":\"s\",\"requestId\":\"r\",\"attempt\":1,",
+        "\"startedAt\":\"2026-11-02T17:30:12.147Z\",",
+        "\"response\":{\"usage\":{\"inputTokens\":10,\"outputTokens\":5}}}\n"
+    );
+    let (calls, report) = parse_fixture(jsonl);
+    assert!(calls.is_empty(), "缺少上游总量时不能生成派生调用");
+    assert_eq!(report.warnings.missing_usage, 1);
+}
+
 /// 检查点提交到全部完整行的换行处，尾部未换行的半行不入库。
 #[test]
 fn checkpoint_commits_only_complete_lines() {

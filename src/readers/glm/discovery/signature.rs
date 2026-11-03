@@ -253,6 +253,9 @@ fn has_model_io_usage(record: SignatureEnvelope) -> bool {
     }
     record.response.is_some_and(|response| {
         response.usage.is_some_and(|usage| {
+            if usage.total_tokens.is_none() {
+                return false;
+            }
             crate::TokenUsage::new_with_component_availability(
                 usage.input_tokens,
                 usage.cache_read_tokens,

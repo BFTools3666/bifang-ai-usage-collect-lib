@@ -151,6 +151,26 @@ fn signature_rejects_inconsistent_token_components() {
     assert_eq!(inspect_root(root.path(), &mut budget), Inspection::Rejected);
 }
 
+/// 输入与输出不能替代上游总量，避免缺失总量的目录被误确认为可信来源。
+#[test]
+fn signature_rejects_input_and_output_without_total() {
+    let root = tempfile::tempdir().expect("isolated rollout exists");
+    fs::write(
+        root.path().join("model-io-sess_missing-total.jsonl"),
+        concat!(
+            "{\"type\":\"model_io\",\"response\":{\"usage\":{",
+            "\"inputTokens\":10,\"outputTokens\":5}}}\n"
+        ),
+    )
+    .expect("missing-total signature is written");
+    let cancellation = CancellationToken::default();
+    let mut budget = SignatureBudget::new(
+        &crate::readers::FullDiscoveryOptions::default(),
+        &cancellation,
+    );
+    assert_eq!(inspect_root(root.path(), &mut budget), Inspection::Rejected);
+}
+
 /// 全设备、快速登记与手动打开均拒绝私有子树伪装的模型 I/O 文件。
 #[test]
 fn private_zcode_subtrees_never_become_usage_roots() {
