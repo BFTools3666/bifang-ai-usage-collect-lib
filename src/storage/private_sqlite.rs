@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 
+/// 普通 SQLite 忙等待与 journal 初始化竞争共用同一有限预算。
+pub(super) const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
+
 /// 标识私有 SQLite 打开失败的稳定类别，不携带路径或 SQL。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PrivateSqliteError {
@@ -58,9 +61,7 @@ pub(crate) async fn open_private_sqlite(
             Ok(_) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 if index + 1 < parts.len() {
-                    tokio::fs::create_dir(&database_path)
-                        .await
-                        .map_err(map_io_error)?;
+                    create_private_subdirectory(&database_path).await?;
                 }
             }
             Err(error) => return Err(map_io_error(error)),
@@ -98,7 +99,7 @@ pub(crate) async fn open_private_sqlite(
                 .filename(&database_path)
                 .create_if_missing(true)
                 .foreign_keys(true)
-                .busy_timeout(Duration::from_millis(5_000))
+                .busy_timeout(SQLITE_BUSY_TIMEOUT)
                 .pragma("trusted_schema", "OFF")
         });
     }
@@ -107,6 +108,23 @@ pub(crate) async fn open_private_sqlite(
         .await
         .map_err(|_| PrivateSqliteError::Database)?;
     Ok((connection, database_path))
+}
+
+/// 并发创建同一父目录时只接纳复读确认的普通目录，链接、文件及其他错误仍拒绝。
+async fn create_private_subdirectory(path: &Path) -> Result<(), PrivateSqliteError> {
+    match tokio::fs::create_dir(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let metadata = tokio::fs::symlink_metadata(path)
+                .await
+                .map_err(map_io_error)?;
+            if crate::readers::discovery::metadata_is_link_like(&metadata) || !metadata.is_dir() {
+                return Err(PrivateSqliteError::InvalidPath);
+            }
+            Ok(())
+        }
+        Err(error) => Err(map_io_error(error)),
+    }
 }
 
 /// 在 Unix 上把数据库限制为当前用户读写；其他平台沿用 基准目录 ACL。
@@ -135,5 +153,52 @@ fn map_io_error(error: std::io::Error) -> PrivateSqliteError {
         PrivateSqliteError::PermissionDenied
     } else {
         PrivateSqliteError::StorageUnavailable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PrivateSqliteError, create_private_subdirectory};
+
+    /// 目录已经被另一创建者建立时允许继续，普通文件同名碰撞仍拒绝。
+    #[tokio::test]
+    async fn concurrent_directory_creation_accepts_only_an_existing_directory() {
+        let temp = tempfile::tempdir().expect("isolated path fixture");
+        let directory = temp.path().join("nested");
+        std::fs::create_dir(&directory).expect("other creator establishes directory");
+        create_private_subdirectory(&directory)
+            .await
+            .expect("existing directory is revalidated");
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"original").expect("file collision fixture");
+        assert_eq!(
+            create_private_subdirectory(&file).await,
+            Err(PrivateSqliteError::InvalidPath)
+        );
+        assert_eq!(
+            std::fs::read(file).expect("collision remains unchanged"),
+            b"original"
+        );
+    }
+
+    /// 并发出现的链接不能被 AlreadyExists 分支当作普通目录接纳。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_directory_creation_rejects_a_link_collision() {
+        let temp = tempfile::tempdir().expect("isolated path fixture");
+        let target = temp.path().join("outside");
+        std::fs::create_dir(&target).expect("link target fixture");
+        let link = temp.path().join("nested");
+        std::os::unix::fs::symlink(&target, &link).expect("link collision fixture");
+        assert_eq!(
+            create_private_subdirectory(&link).await,
+            Err(PrivateSqliteError::InvalidPath)
+        );
+        assert!(
+            std::fs::read_dir(target)
+                .expect("target remains readable")
+                .next()
+                .is_none()
+        );
     }
 }

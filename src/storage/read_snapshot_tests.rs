@@ -325,3 +325,76 @@ async fn active_scan_does_not_deadlock_public_reads_or_its_own_aggregate() {
         11
     );
 }
+
+/// 禁用唯一有调用的根后，未扫描的新根必须保持未扫描，不能借旧根历史伪装就绪。
+#[tokio::test]
+async fn public_index_state_excludes_disabled_root_usage() {
+    let temp = tempfile::tempdir().expect("isolated database");
+    let mut index = LocalIndex::open_in_app_data(temp.path(), PARSER_VERSION)
+        .await
+        .expect("index opens");
+    publish_version(&mut index, temp.path(), 1, 10).await;
+    index
+        .set_root_enabled("root-publication", false)
+        .await
+        .expect("old root is disabled");
+    index
+        .register_root_fields(
+            "root-unscanned",
+            &temp.path().join("unscanned"),
+            "unscanned fixture",
+            DiscoveryMethod::Registered,
+        )
+        .await
+        .expect("new root registers without scanning");
+
+    let snapshot = index
+        .usage_snapshot()
+        .await
+        .expect("visible snapshot reads");
+    assert!(snapshot.canonical.calls.is_empty());
+    assert_eq!(snapshot.index_state, LocalIndexState::NotScanned);
+    assert_eq!(
+        index.index_state().await.expect("bounded state reads"),
+        snapshot.index_state
+    );
+    assert!(
+        index
+            .has_current_parser_usage()
+            .await
+            .expect("scan history remains available")
+    );
+}
+
+/// 仅剩累计诊断快照时没有 canonical 调用，公开状态须与完整视图一致返回可信空结果。
+#[tokio::test]
+async fn public_index_state_does_not_count_diagnostic_snapshots_as_calls() {
+    let temp = tempfile::tempdir().expect("isolated database");
+    let mut index = LocalIndex::open_in_app_data(temp.path(), PARSER_VERSION)
+        .await
+        .expect("index opens");
+    publish_version(&mut index, temp.path(), 1, 10).await;
+    index
+        .connection
+        .execute_unprepared("DELETE FROM usage_calls")
+        .await
+        .expect("fixture retains only diagnostic snapshots");
+
+    let snapshot = index
+        .usage_snapshot()
+        .await
+        .expect("visible snapshot reads");
+    assert!(snapshot.canonical.calls.is_empty());
+    assert_eq!(snapshot.canonical.snapshots.len(), 1);
+    assert_eq!(snapshot.index_state, LocalIndexState::ReadyNoCalls);
+    assert_eq!(
+        index.index_state().await.expect("bounded state reads"),
+        snapshot.index_state
+    );
+    assert!(
+        index
+            .has_current_parser_usage()
+            .await
+            .expect("scan history remains available")
+    );
+}

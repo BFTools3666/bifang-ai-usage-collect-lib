@@ -223,28 +223,98 @@ async fn open_database(
 async fn enable_concurrent_snapshot_reads(
     connection: &DatabaseConnection,
 ) -> Result<(), LocalError> {
-    let mode = connection
-        .query_one_raw(Statement::from_string(
-            DbBackend::Sqlite,
-            "PRAGMA journal_mode = WAL".to_owned(),
-        ))
+    let deadline = tokio::time::Instant::now() + private_sqlite::SQLITE_BUSY_TIMEOUT;
+    let mut backoff = std::time::Duration::from_millis(5);
+    loop {
+        let requested = tokio::time::timeout_at(
+            deadline,
+            connection.query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA journal_mode = WAL".to_owned(),
+            )),
+        )
         .await
-        .map_err(map_database_error)?
-        .ok_or_else(|| {
-            LocalError::new(
-                LocalErrorKind::Database,
-                "local index journal is unreadable",
-            )
-        })?
-        .try_get_by_index::<String>(0)
-        .map_err(map_database_error)?;
-    if mode != "wal" {
-        return Err(LocalError::new(
-            LocalErrorKind::Database,
-            "local index journal does not support concurrent reads",
-        ));
+        .map_err(|_| journal_configuration_timeout())?;
+        match requested {
+            Ok(row) => {
+                if journal_mode(row)? != "wal" {
+                    return Err(LocalError::new(
+                        LocalErrorKind::Database,
+                        "local index journal does not support concurrent reads",
+                    ));
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                if !is_sqlite_lock_contention(&error) {
+                    return Err(map_database_error(error));
+                }
+                #[cfg(test)]
+                wal_mode_tests::pause_after_lock_contention().await;
+                let current = tokio::time::timeout_at(
+                    deadline,
+                    connection.query_one_raw(Statement::from_string(
+                        DbBackend::Sqlite,
+                        "PRAGMA journal_mode".to_owned(),
+                    )),
+                )
+                .await
+                .map_err(|_| journal_configuration_timeout())?;
+                match current {
+                    Ok(row) => {
+                        if journal_mode(row)? == "wal" {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) if !is_sqlite_lock_contention(&error) => {
+                        return Err(map_database_error(error));
+                    }
+                    Err(_) => {}
+                }
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(map_database_error(error));
+                }
+                // journal 切换可能直接返回锁竞争；在共用总预算内异步退避并复核实际模式。
+                tokio::time::sleep(backoff.min(remaining)).await;
+                backoff = (backoff * 2).min(std::time::Duration::from_millis(80));
+            }
+        }
     }
-    Ok(())
+}
+
+/// 竞争预算耗尽是明确数据库失败，不把请求超时改判为 journal 已配置。
+fn journal_configuration_timeout() -> LocalError {
+    LocalError::new(
+        LocalErrorKind::Database,
+        "local index journal configuration timed out",
+    )
+}
+
+/// 只把 SQLite 明确的 BUSY/LOCKED 及其扩展主码识别为可恢复的 journal 锁竞争。
+fn is_sqlite_lock_contention(error: &sea_orm::DbErr) -> bool {
+    let sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(error)) = error else {
+        return false;
+    };
+    error
+        .as_database_error()
+        .and_then(|error| error.code())
+        .is_some_and(|code| {
+            code.parse::<u32>()
+                .is_ok_and(|code| matches!(code & 0xff, 5 | 6))
+        })
+}
+
+/// 从固定 PRAGMA 结果严格恢复实际模式，缺失或无法解码仍然失败关闭。
+fn journal_mode(row: Option<sea_orm::QueryResult>) -> Result<String, LocalError> {
+    row.ok_or_else(|| {
+        LocalError::new(
+            LocalErrorKind::Database,
+            "local index journal is unreadable",
+        )
+    })?
+    .try_get_by_index::<String>(0)
+    .map_err(map_database_error)
 }
 
 /// 把共用 SQLite 打开错误映射为本机索引稳定错误。
@@ -272,3 +342,5 @@ mod read_snapshot_tests;
 mod scan_publication_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wal_mode_tests;

@@ -83,13 +83,34 @@ pub(super) async fn load_index_state(
     parser_version: u32,
 ) -> Result<LocalIndexState, LocalError> {
     let transaction = connection.begin().await.into_local_result()?;
-    let has_usage = has_current_parser_usage(&transaction, parser_version).await?;
+    let has_usage = has_visible_canonical_calls(&transaction, parser_version).await?;
     #[cfg(test)]
     super::read_snapshot_tests::pause_after_index_usage_query().await;
     let state =
         load_local_index_state(&transaction, usize::from(has_usage), parser_version).await?;
     transaction.commit().await.into_local_result()?;
     Ok(state)
+}
+
+/// 公共索引状态只计入已启用根的当前代次调用，与完整快照的可见性保持一致。
+/// 累计快照仅作诊断，扫描内部的历史存在性判断继续使用独立入口。
+async fn has_visible_canonical_calls<C: ConnectionTrait>(
+    connection: &C,
+    parser_version: u32,
+) -> Result<bool, LocalError> {
+    let row = connection
+        .query_one_raw(statement(
+            "SELECT EXISTS(SELECT 1 FROM usage_calls u
+             JOIN source_files f ON f.source_id = u.source_id
+             JOIN source_roots r ON r.root_id = f.root_id
+             WHERE f.parser_version = ?1 AND f.ready = 1
+               AND f.generation = u.generation AND r.enabled = 1)",
+            vec![i64::from(parser_version).into()],
+        ))
+        .await
+        .into_local_result()?
+        .ok_or_else(|| LocalError::new(LocalErrorKind::Database, "usage state is unreadable"))?;
+    Ok(row.try_get_by_index::<i64>(0).into_local_result()? != 0)
 }
 
 /// 从调用方当前连接或事务读取是否已有当前解析代次的可展示事实。
