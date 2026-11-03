@@ -16,10 +16,11 @@ use crate::{
 
 use super::current_user_home;
 use super::discovery::metadata_is_link_like;
+use super::glm::discovery::discover_zcode_quick;
 use super::{
     CancellationToken, ClaudeDiscoveryInputs, DiscoveryInputs, GlmDiscoveryInputs,
-    GrokDiscoveryInputs, LocalVolumeRoots, discover_claude_quick, discover_glm_quick,
-    discover_grok_quick, discover_quick, is_obviously_network_path, validate_local_plain_directory,
+    GrokDiscoveryInputs, LocalVolumeRoots, discover_claude_quick, discover_grok_quick,
+    discover_quick, is_obviously_network_path, validate_local_plain_directory,
 };
 
 mod platform_index;
@@ -391,7 +392,7 @@ fn inspect_explicit_environment_candidates(
         let glm_handle = glm_home_dir.map(|home_dir| {
             let cancellation = cancellation.clone();
             scope.spawn(move || {
-                discover_glm_quick(
+                discover_zcode_quick(
                     &GlmDiscoveryInputs {
                         home_dir: Some(home_dir),
                         registered_roots: Vec::new(),
@@ -768,3 +769,5 @@ fn submit_candidate(
 mod lifecycle_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod zcode_tests;

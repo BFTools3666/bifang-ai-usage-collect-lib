@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 use super::super::super::CancellationToken;
 use super::super::discovery::discover_glm_quick;
-use super::{GlmDiscoveryInputs, Inspection, SignatureBudget, default_rollout_dir, inspect_root};
+use super::{
+    GlmDiscoveryInputs, Inspection, SignatureBudget, default_rollout_dir, discover_zcode_quick,
+    inspect_root,
+};
 
 /// 写入一个带可信用量事件的会话文件。
 fn write_model_io_file(dir: &std::path::Path, name: &str) {
@@ -268,14 +271,19 @@ fn desktop_database_is_the_single_authority_for_a_registered_installation() {
             enabled: true,
         }],
     };
-    let result = discover_glm_quick(&input, &CancellationToken::default());
+    let cli = discover_glm_quick(&input, &CancellationToken::default());
+    assert_eq!(cli.roots.len(), 1);
+    assert_eq!(cli.roots[0].path, input.registered_roots[0].path);
+    assert_eq!(cli.roots[0].root_id, "glm-root-existing");
+    assert!(cli.confirmed_invalid_root_ids.is_empty());
+    let result = discover_zcode_quick(&input, &CancellationToken::default());
     assert_eq!(result.roots.len(), 1);
     assert_eq!(result.roots[0].path, database);
     assert_ne!(result.roots[0].root_id, "glm-root-existing");
     assert_eq!(result.confirmed_invalid_root_ids, ["glm-root-existing"]);
     assert_eq!(result.roots[0].alias, "My ZCode");
     fs::write(database.join("db.sqlite"), b"invalid database").expect("broken source");
-    let broken = discover_glm_quick(&input, &CancellationToken::default());
+    let broken = discover_zcode_quick(&input, &CancellationToken::default());
     assert!(
         broken.roots.is_empty(),
         "bad database must not fall back to overlapping CLI logs"
@@ -315,7 +323,7 @@ fn registered_database_identity_and_retired_rollout_do_not_depend_on_order() {
         vec![old.clone(), current.clone()],
         vec![current.clone(), old.clone()],
     ] {
-        let result = discover_glm_quick(
+        let result = discover_zcode_quick(
             &GlmDiscoveryInputs {
                 home_dir: Some(home.clone()),
                 registered_roots: registered,
@@ -328,7 +336,7 @@ fn registered_database_identity_and_retired_rollout_do_not_depend_on_order() {
     }
     fs::remove_file(database.join("db.sqlite"))
         .expect("simulate missing registered desktop source");
-    let missing = discover_glm_quick(
+    let missing = discover_zcode_quick(
         &GlmDiscoveryInputs {
             home_dir: Some(home),
             registered_roots: vec![current],
@@ -342,4 +350,28 @@ fn registered_database_identity_and_retired_rollout_do_not_depend_on_order() {
     assert!(missing.confirmed_invalid_root_ids.is_empty());
     assert_eq!(missing.unconfirmed_root_ids, ["glm-root-desktop"]);
     assert_eq!(missing.coverage.state, crate::CoverageState::Partial);
+}
+
+/// 全设备发现同样区分旧 CLI 契约与显式桌面优先，不把数据库交给 JSONL 消费者。
+#[test]
+fn full_discovery_keeps_cli_and_desktop_source_policies_separate() {
+    let temp = tempfile::tempdir().expect("isolated home");
+    let home = fs::canonicalize(temp.path()).expect("canonical home");
+    let rollout = default_rollout_dir(&home);
+    let database = home.join(".zcode/cli/db");
+    fs::create_dir_all(&rollout).expect("CLI root");
+    fs::create_dir_all(&database).expect("desktop root");
+    write_model_io_file(&rollout, "model-io-sess_main.jsonl");
+    fs::write(database.join("db.sqlite"), b"SQLite format 3\0").expect("desktop signature");
+    let options = crate::readers::FullDiscoveryOptions {
+        search_roots: vec![home],
+        ..Default::default()
+    };
+    let cancel = CancellationToken::default();
+    let cli = super::discover_glm_full_device_with_progress(&options, &cancel, |_| {});
+    assert_eq!(cli.roots.len(), 1);
+    assert_eq!(cli.roots[0].path, rollout);
+    let desktop = super::discover_zcode_full_device_with_progress(&options, &cancel, |_| {});
+    assert_eq!(desktop.roots.len(), 1);
+    assert_eq!(desktop.roots[0].path, database);
 }

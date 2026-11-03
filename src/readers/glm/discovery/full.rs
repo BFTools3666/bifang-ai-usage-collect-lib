@@ -17,13 +17,48 @@ use super::signature::{
     Inspection, SignatureBudget, coverage_state, crosses_search_root, inspect_root, is_excluded,
     reject_link_components, safe_alias,
 };
-use super::{GlmDiscoveredRoot, GlmDiscoveryResult};
+use super::{DiscoverySource, GlmDiscoveredRoot, GlmDiscoveryResult};
 
 /// 用户主动发起的有界设备发现；命中 GLM rollout 根后不再下钻其子树。
 pub fn discover_glm_full_device_with_progress<F>(
     options: &FullDiscoveryOptions,
     cancellation: &CancellationToken,
+    on_progress: F,
+) -> GlmDiscoveryResult
+where
+    F: FnMut(DiscoveryProgress),
+{
+    discover_full_device(
+        options,
+        cancellation,
+        on_progress,
+        DiscoverySource::CliRollout,
+    )
+}
+
+/// 显式允许桌面数据库作为同安装唯一权威的有界设备发现。
+pub fn discover_zcode_full_device_with_progress<F>(
+    options: &FullDiscoveryOptions,
+    cancellation: &CancellationToken,
+    on_progress: F,
+) -> GlmDiscoveryResult
+where
+    F: FnMut(DiscoveryProgress),
+{
+    discover_full_device(
+        options,
+        cancellation,
+        on_progress,
+        DiscoverySource::DesktopPreferred,
+    )
+}
+
+/// 在同一有界遍历器内应用调用方显式选择的来源策略。
+fn discover_full_device<F>(
+    options: &FullDiscoveryOptions,
+    cancellation: &CancellationToken,
     mut on_progress: F,
+    source: DiscoverySource,
 ) -> GlmDiscoveryResult
 where
     F: FnMut(DiscoveryProgress),
@@ -49,7 +84,9 @@ where
     let mut budget_exhausted = false;
 
     while let Some((path, traversal_root)) = stack.pop() {
-        let path = super::super::path_rules::preferred_glm_root(&path);
+        let Some(path) = source.candidate_root(&path) else {
+            continue;
+        };
         if !is_allowed_glm_discovery_directory(&path) {
             continue;
         }

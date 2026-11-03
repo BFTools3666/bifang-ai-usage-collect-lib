@@ -128,6 +128,8 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 
 发现接口接受显式目录输入，也提供当前平台环境的便利构造，保留本地卷、链接、签名与取消边界。原生路径和项目种子仅供本机身份派生，不应发往界面、网络或日志。解析过程只输出用量和安全元数据，不交付提示词、回答或工具正文。WorkBuddy 保留自身的记录模型和固定来源布局，不为统一接口强行转换为有损的 JSONL 调用模型；面板周期、小时趋势和来源联合规则由产品 core 实现。
 
+`readers::glm::discovery::discover_glm_quick` 与 `discover_glm_full_device_with_progress` 保留 CLI rollout 发现语义。能够读取桌面专用用量库的 GUI 显式使用 `discover_zcode_quick` 与 `discover_zcode_full_device_with_progress`，同安装优先桌面库；GUI 优先发现中的显式环境根也使用该策略。FFI/Node 的既有 JSONL 根扫描不会因桌面库存在而改变来源。
+
 ## FFI 与 Node 接入
 
 独立项目 `ai_usage_collect_scan_ffi` 提供版本化 C ABI，`ai_usage_collect_scan_node` 通过自己的 Node-API 桥接调用它。本扫描库使用安全 Rust 提供只读获取、通用统计及可选统计存储，不包含面板或外语运行时。接口文档分别位于两个包装项目自己的 `docs/`，见 [C ABI](../ai_usage_collect_scan_ffi/docs/API.md) 和 [Node](../ai_usage_collect_scan_node/docs/API.md)。Rust Trait、`Vec`、`String` 和对象内存布局不作为外语 ABI。

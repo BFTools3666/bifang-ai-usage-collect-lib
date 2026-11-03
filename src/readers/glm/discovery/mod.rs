@@ -1,4 +1,4 @@
-//! GLM（Z Code CLI）数据根发现：只承认平铺 `model-io-sess_*.jsonl` 结构签名。
+//! 分别提供保持 CLI 契约的 GLM 发现与桌面库优先的 ZCode 发现。
 
 mod full;
 mod signature;
@@ -6,7 +6,7 @@ mod signature;
 #[cfg(test)]
 mod tests;
 
-pub use full::discover_glm_full_device_with_progress;
+pub use full::{discover_glm_full_device_with_progress, discover_zcode_full_device_with_progress};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -32,7 +32,7 @@ pub use signature::{
 /// 汇总 GLM 快速发现的显式候选，不在构造阶段访问文件系统。
 #[derive(Debug, Clone, Default)]
 pub struct GlmDiscoveryInputs {
-    /// 当前用户主目录；存在时只检查其 `.zcode/cli/rollout` 直接候选。
+    /// 当前用户主目录；固定检查 CLI rollout，显式桌面策略同时考虑同安装 cli/db。
     pub home_dir: Option<PathBuf>,
     /// 仅属于 GLM 客户端的已登记根。
     pub registered_roots: Vec<RegisteredRoot>,
@@ -48,7 +48,7 @@ impl GlmDiscoveryInputs {
     }
 }
 
-/// 一个通过 GLM rollout 签名确认的数据根。
+/// 一个按调用方来源策略通过签名确认的 ZCode 本机数据根。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlmDiscoveredRoot {
     /// 仅 backend 使用的规范化访问路径。
@@ -97,23 +97,56 @@ struct Candidate {
 }
 
 /// 只快速检查默认本机目录与已启用登记根。
+/// 此既有入口只发现 CLI rollout，不因同安装桌面库存在而改变来源。
 pub fn discover_glm_quick(
     inputs: &GlmDiscoveryInputs,
     cancellation: &CancellationToken,
 ) -> GlmDiscoveryResult {
     inspect_candidates(
-        quick_candidates(inputs),
+        quick_candidates(inputs, DiscoverySource::CliRollout),
         cancellation,
         &FullDiscoveryOptions::default(),
     )
 }
 
+/// 显式选择桌面库优先策略，同安装 CLI 仅在没有桌面来源时作为回退。
+pub fn discover_zcode_quick(
+    inputs: &GlmDiscoveryInputs,
+    cancellation: &CancellationToken,
+) -> GlmDiscoveryResult {
+    inspect_candidates(
+        quick_candidates(inputs, DiscoverySource::DesktopPreferred),
+        cancellation,
+        &FullDiscoveryOptions::default(),
+    )
+}
+
+/// 明确区分旧 CLI 消费者和能够读取桌面库的调用方，不从存储 feature 推断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscoverySource {
+    CliRollout,
+    DesktopPreferred,
+}
+
+impl DiscoverySource {
+    /// 仅显式桌面策略允许把日志根提升为同安装数据库来源。
+    fn candidate_root(self, path: &std::path::Path) -> Option<PathBuf> {
+        match self {
+            Self::CliRollout if super::path_rules::is_glm_database_root(path) => None,
+            Self::CliRollout => Some(path.to_path_buf()),
+            Self::DesktopPreferred => Some(super::path_rules::preferred_glm_root(path)),
+        }
+    }
+}
+
 /// 从默认本机目录与已启用登记根生成有界快速扫描候选。
-fn quick_candidates(inputs: &GlmDiscoveryInputs) -> Vec<Candidate> {
+fn quick_candidates(inputs: &GlmDiscoveryInputs, source: DiscoverySource) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     for root in &inputs.registered_roots {
         if root.enabled {
-            let preferred = super::path_rules::preferred_glm_root(&root.path);
+            let Some(preferred) = source.candidate_root(&root.path) else {
+                continue;
+            };
             let replacing = preferred != root.path;
             candidates.push(Candidate {
                 existing_root_id: if replacing {
@@ -138,14 +171,17 @@ fn quick_candidates(inputs: &GlmDiscoveryInputs) -> Vec<Candidate> {
             .parent()
             .expect("fixed rollout has parent")
             .join("db");
-        let path = if inputs
-            .registered_roots
-            .iter()
-            .any(|root| root.enabled && root.path == database)
+        let path = if source == DiscoverySource::DesktopPreferred
+            && inputs
+                .registered_roots
+                .iter()
+                .any(|root| root.enabled && root.path == database)
         {
             database
         } else {
-            super::path_rules::preferred_glm_root(&rollout)
+            source
+                .candidate_root(&rollout)
+                .expect("fixed CLI rollout is allowed")
         };
         candidates.push(Candidate {
             existing_root_id: None,
