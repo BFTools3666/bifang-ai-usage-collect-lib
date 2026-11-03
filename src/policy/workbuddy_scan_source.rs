@@ -1,5 +1,5 @@
 //! WorkBuddy 只读本机来源策略：固定路径与稳定身份推导。
-//! 本模块不探测文件系统，也不允许 WorkBuddy 进入物理扫描、registry 或 checkpoint。
+//! 本模块不探测文件系统；固定来源可进入独立 WorkbuddyIndex，不占用通用物理 Agent 槽位。
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ pub const WORKBUDDY_PROJECTS_DIR_NAME: &str = "projects";
 
 /// GUI adapter 已确认存在的 WorkBuddy 只读本机来源。
 ///
-/// 类型名为兼容既有 DTO 保留；该来源绝不是可登记的物理扫描根。
+/// 类型名为兼容既有 DTO 保留；该来源使用固定双根增量库，不接受 GUI 手动扩展根。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkbuddyScanSource {
     /// 稳定根 ID，前缀为 `workbuddy-root-`。

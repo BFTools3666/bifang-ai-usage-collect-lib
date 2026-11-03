@@ -9,6 +9,8 @@ pub use file_import::PreparedFileIndex;
 mod binding;
 mod call_store;
 mod checkpoint;
+pub mod workbuddy;
+pub use workbuddy::{WorkbuddyIndex, WorkbuddyIndexOutcome, WorkbuddyRefreshMode};
 mod zcode;
 pub use zcode::ZcodeDatabaseIndexOutcome;
 mod error;

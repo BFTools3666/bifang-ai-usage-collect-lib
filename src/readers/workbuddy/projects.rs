@@ -17,44 +17,44 @@ const MAX_DIRECTORY_ENTRIES: usize = 100_000;
 const MAX_TRANSCRIPT_FILES: usize = 25_000;
 
 /// 一个已经通过相对布局与链接边界检查的 JSONL 候选。
-pub(super) struct WorkbuddyProjectFile {
+pub(crate) struct WorkbuddyProjectFile {
     /// JSONL 文件的真实路径，仅在读取时使用，不进入输出。
-    pub(super) path: PathBuf,
+    pub(crate) path: PathBuf,
     /// 相对于数据根的稳定键，用于去重与排序。
-    pub(super) relative_key: String,
+    pub(crate) relative_key: String,
     /// 用于派生项目键的原料，不直接展示。
-    pub(super) project_key_material: String,
+    pub(crate) project_key_material: String,
     /// 文件来源类别（顶层会话或子代理）。
-    pub(super) origin: WorkbuddyUsageOrigin,
+    pub(crate) origin: WorkbuddyUsageOrigin,
 }
 
 /// 路径枚举的文件集合和覆盖计数。
 #[derive(Default)]
-pub(super) struct WorkbuddyProjectFiles {
+pub(crate) struct WorkbuddyProjectFiles {
     /// 通过布局与链接检查的候选文件。
-    pub(super) files: Vec<WorkbuddyProjectFile>,
+    pub(crate) files: Vec<WorkbuddyProjectFile>,
     /// 顶层会话文件数。
-    pub(super) top_level_file_count: u64,
+    pub(crate) top_level_file_count: u64,
     /// 子代理会话文件数。
-    pub(super) subagent_file_count: u64,
+    pub(crate) subagent_file_count: u64,
     /// 因权限不足被跳过的位置数。
-    pub(super) permission_denied_count: u64,
+    pub(crate) permission_denied_count: u64,
     /// 因规则或错误被跳过的位置数。
-    pub(super) skipped_count: u64,
+    pub(crate) skipped_count: u64,
     /// 文件或目录预算是否已耗尽。
-    pub(super) budget_exhausted: bool,
+    pub(crate) budget_exhausted: bool,
 }
 
 impl WorkbuddyProjectFiles {
     /// 返回两类受限来源文件总数。
-    pub(super) fn file_count(&self) -> u64 {
+    pub(crate) fn file_count(&self) -> u64 {
         self.top_level_file_count
             .saturating_add(self.subagent_file_count)
     }
 }
 
 /// 只枚举 `projects/<project>/<session>.jsonl` 与一层 `subagents/*.jsonl`。
-pub(super) fn discover_project_files<C: WorkbuddyCancellation + ?Sized>(
+pub(crate) fn discover_project_files<C: WorkbuddyCancellation + ?Sized>(
     workbuddy_home: &Path,
     cancellation: &C,
 ) -> Result<WorkbuddyProjectFiles, WorkbuddyReadError> {

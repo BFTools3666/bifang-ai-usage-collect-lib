@@ -20,16 +20,16 @@ use super::projects::{WorkbuddyProjectFile, discover_project_files};
 use super::{WorkbuddyCancellation, WorkbuddyReadError};
 
 /// 单次读取允许消耗的 project JSONL 总字节数。
-const MAX_PROJECT_JSONL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(crate) const MAX_PROJECT_JSONL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// 单次读取允许保留的 usage 事件数。
-const MAX_USAGE_RECORDS: usize = 500_000;
+pub(crate) const MAX_USAGE_RECORDS: usize = 500_000;
 
 /// 一次 project JSONL 读取的安全投影与覆盖结论。
-pub(super) struct WorkbuddyProjectUsageRead {
+pub(crate) struct WorkbuddyProjectUsageRead {
     /// 已通过白名单投影的用量事件记录。
-    pub(super) records: Vec<WorkbuddyUsageEventRecord>,
+    pub(crate) records: Vec<WorkbuddyUsageEventRecord>,
     /// 本次读取的覆盖结论；预算耗尽、权限拒绝或警告都会使其为部分覆盖。
-    pub(super) coverage: CoverageReport,
+    pub(crate) coverage: CoverageReport,
 }
 
 /// 只反序列化顶层事件中统计必需的白名单字段。
@@ -118,7 +118,7 @@ enum LineOutcome {
 }
 
 /// 枚举并读取全部获批 project JSONL 布局；单文件失败时保留其它可用事实并标为部分覆盖。
-pub(super) fn read_project_usage<C: WorkbuddyCancellation + ?Sized>(
+pub(crate) fn read_project_usage<C: WorkbuddyCancellation + ?Sized>(
     workbuddy_home: &Path,
     root_id: &str,
     cancellation: &C,
@@ -196,7 +196,7 @@ pub(super) fn read_project_usage<C: WorkbuddyCancellation + ?Sized>(
 }
 
 /// 打开普通文件、复核链接与句柄身份，并冻结本轮只读长度。
-pub(super) fn open_fixed_prefix(path: &Path) -> std::io::Result<(File, u64)> {
+pub(crate) fn open_fixed_prefix(path: &Path) -> std::io::Result<(File, u64)> {
     let file = File::open(path)?;
     let opened_metadata = file.metadata()?;
     if !opened_metadata.is_file() || walk_ancestors_for_link_component(path)? {
@@ -219,15 +219,21 @@ pub(super) fn open_fixed_prefix(path: &Path) -> std::io::Result<(File, u64)> {
 }
 
 /// 单文件解析报告。
-struct ProjectStreamReport {
+pub(crate) struct ProjectStreamReport {
+    /// 已完成解析的完整行字节数。
+    #[cfg(feature = "storage")]
+    pub(crate) committed_bytes: u64,
+    /// 尚未换行的尾部字节数。
+    #[cfg(feature = "storage")]
+    pub(crate) trailing_bytes: u64,
     /// 本文件解析中遇到的警告行数。
-    warning_count: u64,
+    pub(crate) warning_count: u64,
     /// 记录数是否触及上限而提前停止。
-    record_budget_exhausted: bool,
+    pub(crate) record_budget_exhausted: bool,
 }
 
 /// 用共享有界切行器逐行反序列化白名单字段；超长行流式解析，末尾半行不提交。
-fn parse_project_stream<C: WorkbuddyCancellation + ?Sized>(
+pub(crate) fn parse_project_stream<C: WorkbuddyCancellation + ?Sized>(
     reader: Take<File>,
     source: &WorkbuddyProjectFile,
     root_id: &str,
@@ -263,6 +269,10 @@ fn parse_project_stream<C: WorkbuddyCancellation + ?Sized>(
         return Err(cancelled_io_error());
     }
     Ok(ProjectStreamReport {
+        #[cfg(feature = "storage")]
+        committed_bytes: progress.committed_bytes,
+        #[cfg(feature = "storage")]
+        trailing_bytes: progress.trailing_bytes,
         warning_count,
         record_budget_exhausted,
     })

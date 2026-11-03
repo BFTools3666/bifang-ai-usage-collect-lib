@@ -1,6 +1,6 @@
 //! WorkBuddy 固定本机布局的只读用量与 Trace 投影。
-mod jsonl;
-mod projects;
+pub(crate) mod jsonl;
+pub(crate) mod projects;
 use self::jsonl::{open_fixed_prefix, read_project_usage};
 use self::projects::{WorkbuddyProjectFiles, discover_project_files};
 /// 与其他来源共用宿主取消协议，保留原路径作为兼容名称。

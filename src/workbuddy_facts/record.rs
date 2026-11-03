@@ -70,7 +70,7 @@ pub struct WorkbuddyUsageQuality {
 }
 
 /// 已验证并去重的逐请求事实，可由消费方聚合或投影到 wire 数据。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ValidatedWorkbuddyUsageRecord {
     /// 稳定逻辑调用 ID，去重与冲突判定的键。
     pub logical_call_id: String,

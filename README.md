@@ -157,3 +157,7 @@ ZCode（Z Code CLI）使用 `JsonlFormat::Glm`，只接受获授权 rollout 根�
 ### ZCode 桌面用量库
 
 启用既有 `storage` feature 后，`readers::glm::database::ZcodeUsageDatabase` 分页只读固定 `~/.zcode/cli/db/db.sqlite` 的 `model_usage` 白名单列；`LocalIndex::index_zcode_database` 在宿主已有扫描事务内写入本产品派生库。每轮读一致快照及 WAL，以 `computed_total_tokens` 为总量，保留真实模型名，包含付费与免费模型。默认发现同安装优先数据库，只有库缺失时选择 rollout，坏库不回退。CLI 的 `JsonlFormat::Glm` 接口保持 JSONL，不把 SQLite 字节交给 JSONL parser；稳定 `glm`/provider 编码保持兼容。
+
+### WorkBuddy 增量派生库
+
+既有 `storage` feature 提供 `storage::WorkbuddyIndex::open(base_dir, relative_path)`；GUI 使用本产品 app-data 的 `workbuddy.db`。`refresh(sources, cutoff, WorkbuddyRefreshMode::Incremental, cancellation)` 只续读变化文件，`Rebuild` 用于用户重新索引；`load_inputs_with_cancellation` 返回同一份已发布的 `WorkbuddyUsageInputs`，不触碰原始 JSONL，`prune_before` 仅清理过期派生事件。两固定根原子发布，积分与顶层/subagent 信息保留，未知/其它 Agent 数据库拒绝接管。原始 `readWorkbuddy`/`read_workbuddy_usage_inputs` API 仍可供明确选择无持久层的消费方使用；GUI 不把它作为读库失败的回退。C ABI/Node 当前存储包装不因此新增 WorkBuddy index wire 操作。
