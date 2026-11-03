@@ -45,6 +45,16 @@ pub struct CanonicalUsageSet {
 
 /// 统一去重结果并保持 provenance。
 pub fn canonicalize_usage_calls(calls: Vec<UsageCall>) -> CanonicalUsageSet {
+    canonicalize_usage_calls_with_check(calls, || Ok::<(), std::convert::Infallible>(()))
+        .unwrap_or_else(|never| match never {})
+}
+
+/// 在每条调用、来源及结果整理边界执行宿主提供的运行时中立取消检查。
+pub(crate) fn canonicalize_usage_calls_with_check<E>(
+    calls: Vec<UsageCall>,
+    mut check: impl FnMut() -> Result<(), E>,
+) -> Result<CanonicalUsageSet, E> {
+    check()?;
     let mut canonical = BTreeMap::<String, UsageCall>::new();
     let mut duplicate_source_count = 0_u64;
     let mut duplicate_counts_by_call = BTreeMap::<String, u64>::new();
@@ -53,6 +63,7 @@ pub fn canonicalize_usage_calls(calls: Vec<UsageCall>) -> CanonicalUsageSet {
     let mut warnings = Vec::new();
 
     for call in calls {
+        check()?;
         let logical_call_id = call.logical_call_id.clone();
         let incoming_confidence = call.confidence;
 
@@ -99,12 +110,13 @@ pub fn canonicalize_usage_calls(calls: Vec<UsageCall>) -> CanonicalUsageSet {
                     }
                 }
 
-                merge_provenance(&mut existing.provenance, call.provenance);
+                merge_provenance_with_check(&mut existing.provenance, call.provenance, &mut check)?;
             }
         }
     }
 
     for call in canonical.values_mut() {
+        check()?;
         call.provenance.sort_by(|left, right| {
             left.root_id
                 .cmp(&right.root_id)
@@ -114,9 +126,30 @@ pub fn canonicalize_usage_calls(calls: Vec<UsageCall>) -> CanonicalUsageSet {
         });
     }
 
-    let calls = canonical.into_values().collect::<Vec<_>>();
-    let empty_tokens = empty_tokens_for_calls(&calls);
-    CanonicalUsageSet {
+    let mut calls = Vec::with_capacity(canonical.len());
+    let mut availability = [true; 5];
+    for call in canonical.into_values() {
+        check()?;
+        for (available, value) in availability.iter_mut().zip([
+            call.usage.input_tokens,
+            call.usage.cached_input_tokens,
+            call.usage.cache_write_input_tokens,
+            call.usage.output_tokens,
+            call.usage.reasoning_output_tokens,
+        ]) {
+            *available &= value.is_some();
+        }
+        calls.push(call);
+    }
+    let empty_tokens = TokenUsage::zero_with_all_component_availability(
+        availability[0],
+        availability[1],
+        availability[2],
+        availability[3],
+        availability[4],
+    );
+    check()?;
+    Ok(CanonicalUsageSet {
         total_token_accounting: TotalTokenAccounting::Observed,
         empty_tokens,
         calls,
@@ -124,7 +157,7 @@ pub fn canonicalize_usage_calls(calls: Vec<UsageCall>) -> CanonicalUsageSet {
         duplicate_counts_by_call,
         warnings,
         snapshots: Vec::new(),
-    }
+    })
 }
 
 /// 合并同一调用的互补可用分项；双方都提供且数值不同时才视为冲突。
@@ -170,9 +203,20 @@ impl CanonicalUsageSet {
 pub fn canonicalize_session_snapshots(
     snapshots: Vec<SessionTokenSnapshot>,
 ) -> Vec<SessionTokenSnapshot> {
+    canonicalize_session_snapshots_with_check(snapshots, || Ok::<(), std::convert::Infallible>(()))
+        .unwrap_or_else(|never| match never {})
+}
+
+/// 按既有先到事实与来源排序规则合并累计快照，并在各条边界检查取消。
+fn canonicalize_session_snapshots_with_check<E>(
+    snapshots: Vec<SessionTokenSnapshot>,
+    mut check: impl FnMut() -> Result<(), E>,
+) -> Result<Vec<SessionTokenSnapshot>, E> {
+    check()?;
     let mut canonical =
         std::collections::BTreeMap::<(String, i64, String), SessionTokenSnapshot>::new();
     for snapshot in snapshots {
+        check()?;
         let key = (
             snapshot.thread_key.clone(),
             snapshot.occurred_at_epoch_ms,
@@ -183,12 +227,17 @@ pub fn canonicalize_session_snapshots(
                 canonical.insert(key, snapshot);
             }
             Some(existing) => {
-                merge_provenance(&mut existing.provenance, snapshot.provenance);
+                merge_provenance_with_check(
+                    &mut existing.provenance,
+                    snapshot.provenance,
+                    &mut check,
+                )?;
             }
         }
     }
-    let mut snapshots = canonical.into_values().collect::<Vec<_>>();
-    for snapshot in &mut snapshots {
+    let mut snapshots = Vec::with_capacity(canonical.len());
+    for mut snapshot in canonical.into_values() {
+        check()?;
         snapshot.provenance.sort_by(|left, right| {
             left.root_id
                 .cmp(&right.root_id)
@@ -196,8 +245,10 @@ pub fn canonicalize_session_snapshots(
                 .then_with(|| left.relative_label.cmp(&right.relative_label))
                 .then_with(|| left.archived.cmp(&right.archived))
         });
+        snapshots.push(snapshot);
     }
-    snapshots
+    check()?;
+    Ok(snapshots)
 }
 
 /// 把已去重快照附到 canonical 集合；调用去重结果保持不变。
@@ -209,7 +260,19 @@ pub fn attach_session_snapshots(
     canonical
 }
 
+/// 在累计快照整理阶段复用同一取消检查；失败时不返回半套 canonical 集合。
+#[cfg(feature = "storage")]
+pub(crate) fn attach_session_snapshots_with_check<E>(
+    mut canonical: CanonicalUsageSet,
+    snapshots: Vec<SessionTokenSnapshot>,
+    check: impl FnMut() -> Result<(), E>,
+) -> Result<CanonicalUsageSet, E> {
+    canonical.snapshots = canonicalize_session_snapshots_with_check(snapshots, check)?;
+    Ok(canonical)
+}
+
 /// 计算空集合时可见字段可用性，避免把未知误标记为 0。
+#[cfg(test)]
 pub(crate) fn empty_tokens_for_calls(calls: &[UsageCall]) -> TokenUsage {
     let Some(_) = calls.first() else {
         return TokenUsage::zero();
@@ -231,12 +294,18 @@ pub(crate) fn empty_tokens_for_calls(calls: &[UsageCall]) -> TokenUsage {
 }
 
 /// 合并重复调用的来源证据，并保持每个物理来源只出现一次。
-fn merge_provenance(existing: &mut Vec<SourceProvenance>, incoming: Vec<SourceProvenance>) {
+fn merge_provenance_with_check<E>(
+    existing: &mut Vec<SourceProvenance>,
+    incoming: Vec<SourceProvenance>,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     for provenance in incoming {
+        check()?;
         if !existing.contains(&provenance) {
             existing.push(provenance);
         }
     }
+    Ok(())
 }
 
 /// 把置信度映射为可比较等级，供冲突事实选择使用。

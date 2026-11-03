@@ -11,7 +11,10 @@ fn all_agents() -> RootDiscoveryAgentScope {
 fn fair_queue_rotates_beyond_worker_count() {
     let mut queues = (0..3)
         .map(|index| VolumeQueue {
-            pending: VecDeque::from([PathBuf::from(format!("volume-{index}"))]),
+            pending: [PathBuf::from(format!("volume-{index}"))]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             completed: false,
             traversal_root: PathBuf::from(format!("volume-{index}")),
         })
@@ -27,12 +30,15 @@ fn fair_queue_rotates_beyond_worker_count() {
 #[test]
 fn single_volume_fills_available_workers() {
     let mut queues = vec![VolumeQueue {
-        pending: VecDeque::from([
+        pending: [
             PathBuf::from("a"),
             PathBuf::from("b"),
             PathBuf::from("c"),
             PathBuf::from("d"),
-        ]),
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect(),
         completed: false,
         traversal_root: PathBuf::from("root"),
     }];

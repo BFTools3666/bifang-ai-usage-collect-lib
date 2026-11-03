@@ -8,11 +8,15 @@ use uuid::Uuid;
 
 use crate::{
     CanonicalUsageSet, CoverageState, LocalIndexState, LocalUsageAggregate, ProviderKind,
-    aggregate_canonical_usage,
+    ScanCancellation,
 };
 
 use super::call_store::to_sql_u64;
-use super::snapshot::{load_canonical_calls, load_usage_snapshot, load_usage_snapshot_since};
+use super::snapshot::{
+    load_canonical_calls_since_with_cancellation, load_canonical_snapshot_with_cancellation,
+    load_usage_snapshot, load_usage_snapshot_since,
+};
+use super::snapshot_cpu::{aggregate_owned_canonical, check_cancelled};
 use super::{
     ActiveScanRecord, IntoLocalResult, LocalError, LocalErrorKind, LocalIndex, UsageSnapshot,
     map_database_error, stable_id,
@@ -389,13 +393,40 @@ impl LocalIndex {
         &self,
         provider: ProviderKind,
     ) -> Result<LocalUsageAggregate, LocalError> {
+        self.aggregate_active_scan_for_provider_with_cancellation(
+            provider,
+            &ScanCancellation::default(),
+        )
+        .await
+    }
+
+    /// 扫描摘要在 SQL 页与 CPU 调用边界响应取消，不返回或发布半套聚合。
+    /// # Errors
+    /// 取消或读取失败返回脱敏错误，调用方仍须回滚当前扫描事务。
+    pub async fn aggregate_active_scan_for_provider_with_cancellation(
+        &self,
+        provider: ProviderKind,
+        cancellation: &ScanCancellation,
+    ) -> Result<LocalUsageAggregate, LocalError> {
+        check_cancelled(cancellation)?;
         let canonical = if let Some(transaction) = &self.active_scan_transaction {
-            load_canonical_calls(transaction, self.parser_version).await?
+            load_canonical_calls_since_with_cancellation(
+                transaction,
+                self.parser_version,
+                i64::MIN,
+                cancellation,
+            )
+            .await?
         } else {
-            self.canonical_calls().await?
-        }
-        .with_total_token_accounting(provider.local_total_token_accounting());
-        aggregate_canonical_usage(&canonical).map_err(LocalError::from)
+            self.ensure_published_read()?;
+            load_canonical_snapshot_with_cancellation(
+                &self.connection,
+                self.parser_version,
+                cancellation,
+            )
+            .await?
+        };
+        aggregate_owned_canonical(canonical, provider, cancellation).await
     }
 
     /// 在同一只读事务内读取已发布调用与累计快照，并执行 canonical 去重。
@@ -429,7 +460,12 @@ impl LocalIndex {
     #[cfg(any(test, feature = "test-util"))]
     pub async fn aggregate(&self) -> Result<LocalUsageAggregate, LocalError> {
         let canonical = self.canonical_calls().await.into_local_result()?;
-        aggregate_canonical_usage(&canonical).map_err(LocalError::from)
+        aggregate_owned_canonical(
+            canonical,
+            ProviderKind::RolloutJsonl,
+            &ScanCancellation::default(),
+        )
+        .await
     }
 
     /// 按明确本机 provider 的业务口径聚合当前 generation，供扫描摘要复用。
@@ -437,12 +473,26 @@ impl LocalIndex {
         &self,
         provider: ProviderKind,
     ) -> Result<LocalUsageAggregate, LocalError> {
-        let canonical = self
-            .canonical_calls()
+        self.aggregate_for_provider_with_cancellation(provider, &ScanCancellation::default())
             .await
-            .into_local_result()?
-            .with_total_token_accounting(provider.local_total_token_accounting());
-        aggregate_canonical_usage(&canonical).map_err(LocalError::from)
+    }
+
+    /// 从同一已发布快照生成可取消摘要，保持当前 parser 与 provider 总量口径。
+    /// # Errors
+    /// 活动写事务仍返回 ScanBusy，取消和存储错误返回稳定脱敏类别。
+    pub async fn aggregate_for_provider_with_cancellation(
+        &self,
+        provider: ProviderKind,
+        cancellation: &ScanCancellation,
+    ) -> Result<LocalUsageAggregate, LocalError> {
+        self.ensure_published_read()?;
+        let canonical = load_canonical_snapshot_with_cancellation(
+            &self.connection,
+            self.parser_version,
+            cancellation,
+        )
+        .await?;
+        aggregate_owned_canonical(canonical, provider, cancellation).await
     }
 
     /// 清空本产品派生调用、checkpoint 与扫描记录，保留用户根登记。

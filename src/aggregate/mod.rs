@@ -16,3 +16,10 @@ pub use filter::{copy_matching_snapshots, filter_canonical_usage, partition_cano
 pub use fusion::{MetricFusionError, prefer_metric_within_scope};
 
 pub(crate) use canonicalization::lower_confidence;
+
+#[cfg(feature = "storage")]
+pub(crate) use aggregation::aggregate_canonical_usage_with_check;
+#[cfg(feature = "storage")]
+pub(crate) use canonicalization::{
+    attach_session_snapshots_with_check, canonicalize_usage_calls_with_check,
+};

@@ -1,34 +1,40 @@
 //! 平台范围只凭卷、目录项与文件名发现候选；显式环境根另走有界严格签名。
 
-use std::collections::{HashSet, VecDeque};
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use crate::{
     CoverageReport, RootCandidate, RootCandidateEvidence, RootDiscoveryAgentScope,
-    RootDiscoveryCoordinator, RootDiscoveryPlatform, RootDiscoveryProgress, RootDiscoveryScope,
-    RootDiscoveryStrategy, SourceClientKind, append_platform_discovery_excludes_for_volumes,
-    is_discovery_path_excluded, path_has_full_discovery_skip_directory_name, stable_id,
+    RootDiscoveryCoordinator, RootDiscoveryProgress, RootDiscoveryScope, RootDiscoveryStrategy,
+    SourceClientKind, append_platform_discovery_excludes_for_volumes,
+    path_has_full_discovery_skip_directory_name, stable_id,
 };
 
 use super::current_user_home;
-use super::discovery::metadata_is_link_like;
 use super::glm::discovery::discover_zcode_quick;
 use super::{
     CancellationToken, ClaudeDiscoveryInputs, DiscoveryInputs, GlmDiscoveryInputs,
     GrokDiscoveryInputs, LocalVolumeRoots, discover_claude_quick, discover_grok_quick,
-    discover_quick, is_obviously_network_path, validate_local_plain_directory,
+    discover_quick, validate_local_plain_directory,
 };
+
+#[cfg(test)]
+use crate::RootDiscoveryPlatform;
 
 mod platform_index;
 mod scope;
+mod traversal;
+use traversal::discover_metadata_roots_in_with_callback;
+#[cfg(test)]
+use traversal::{MetadataWorkerPool, VolumeQueue, take_fair_jobs};
 
 use scope::{
-    candidate_from_file_name, current_platform, discovery_scope, is_unselected_agent_directory,
-    path_under_unselected_agent_directory, platform_priority_roots, priority_queue,
+    candidate_from_file_name, current_platform, discovery_scope,
+    path_under_unselected_agent_directory, platform_priority_roots,
 };
 
 /// 执行结果只包含非路径计数；候选直接提交到运行时协调器。
@@ -49,114 +55,6 @@ struct ExplicitEnvironmentInspection {
     permission_denied: u64,
     /// 因链接、非本地卷等原因跳过的计数。
     skipped: u64,
-}
-
-/// 单个卷内待遍历目录的广度优先队列及其完成标记。
-#[derive(Debug)]
-struct VolumeQueue {
-    /// 待处理的目录队列。
-    pending: VecDeque<PathBuf>,
-    /// 标识本卷是否已遍历完成。
-    completed: bool,
-    /// 该卷发现遍历的根路径。
-    traversal_root: PathBuf,
-}
-
-/// 单个目录一次遍历产出的子目录、命中候选与错误/跳过计数。
-#[derive(Debug, Default)]
-struct DirectoryResult {
-    /// 待继续入队的子目录。
-    children: Vec<PathBuf>,
-    /// 本次遍历命中的候选路径及其证据类型。
-    candidates: Vec<(PathBuf, RootCandidateEvidence)>,
-    /// 本次检查过的文件名数量。
-    file_names_checked: u64,
-    /// 权限拒绝计数。
-    permission_denied: u64,
-    /// I/O 错误计数。
-    io_errors: u64,
-    /// 因链接、非本地卷等原因跳过的计数。
-    skipped: u64,
-}
-
-/// 覆盖整次发现生命周期的固定目录 worker 池，避免每轮反复创建原生线程。
-struct MetadataWorkerPool {
-    /// 任务发送端；关闭后 worker 退出。
-    sender: Option<mpsc::SyncSender<(usize, PathBuf)>>,
-    /// 按任务序号返回目录结果；失败只保留空错误。
-    results: mpsc::Receiver<(usize, Result<DirectoryResult, ()>)>,
-    /// worker 线程句柄，池销毁时回收。
-    workers: Vec<std::thread::JoinHandle<()>>,
-}
-
-impl MetadataWorkerPool {
-    /// 创建固定大小的元数据探测工作池并启动受控 worker。
-    fn new(
-        worker_count: usize,
-        agents: RootDiscoveryAgentScope,
-        coordinator: RootDiscoveryCoordinator,
-    ) -> Self {
-        let (sender, receiver) = mpsc::sync_channel::<(usize, PathBuf)>(worker_count * 2);
-        let receiver = Arc::new(Mutex::new(receiver));
-        let (result_sender, results) = mpsc::channel();
-        let mut workers = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
-            let receiver = Arc::clone(&receiver);
-            let result_sender = result_sender.clone();
-            let coordinator = coordinator.clone();
-            workers.push(std::thread::spawn(move || {
-                loop {
-                    let job = receiver
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .recv();
-                    let Ok((volume, path)) = job else {
-                        break;
-                    };
-                    let result = std::panic::catch_unwind(|| {
-                        inspect_directory_metadata(&path, agents, &coordinator)
-                    })
-                    .map_err(|_| ());
-                    if result_sender.send((volume, result)).is_err() {
-                        break;
-                    }
-                }
-            }));
-        }
-        drop(result_sender);
-        Self {
-            sender: Some(sender),
-            results,
-            workers,
-        }
-    }
-
-    /// 提交一批目录探测任务，并按原序收集每项结果。
-    fn inspect(&self, jobs: Vec<(usize, PathBuf)>) -> Vec<(usize, Result<DirectoryResult, ()>)> {
-        let Some(sender) = self.sender.as_ref() else {
-            return Vec::new();
-        };
-        let mut expected = 0_usize;
-        for job in jobs {
-            if sender.send(job).is_err() {
-                break;
-            }
-            expected += 1;
-        }
-        (0..expected)
-            .filter_map(|_| self.results.recv().ok())
-            .collect()
-    }
-}
-
-impl Drop for MetadataWorkerPool {
-    /// 关闭任务通道并回收全部元数据探测 worker。
-    fn drop(&mut self) {
-        self.sender.take();
-        for worker in self.workers.drain(..) {
-            let _ = worker.join();
-        }
-    }
 }
 
 /// 执行发现并在候选首次插入时立即通知调用方。
@@ -222,20 +120,15 @@ pub fn discover_metadata_roots_with_callback(
         }
         return MetadataDiscoverySummary::default();
     }
-    let (system_index_available, indexed_paths) = if platform_index::should_query(discovery_kind) {
-        platform_index::query(&volumes, coordinator, agents)
-    } else {
-        (false, Vec::new())
-    };
-    for path in indexed_paths {
+    let on_indexed_path = |path: PathBuf| {
         if coordinator.is_cancel_requested() {
-            break;
+            return;
         }
         if path_blocked_by_discovery_policy(&path, &volumes)
             || !path_is_in_search_scope(&path, &volumes)
             || path_under_unselected_agent_directory(&path, agents)
         {
-            continue;
+            return;
         }
         if let Some((candidate, evidence)) = candidate_from_file_name(&path, agents)
             && validate_local_plain_directory(&candidate).is_ok()
@@ -249,6 +142,15 @@ pub fn discover_metadata_roots_with_callback(
                 &on_candidate,
             );
         }
+    };
+    let system_index_available = platform_index::should_query(discovery_kind)
+        && platform_index::query(&volumes, coordinator, agents, on_indexed_path);
+    if coordinator.is_cancel_requested() {
+        coordinator.finish(system_index_available, false);
+        return MetadataDiscoverySummary {
+            system_index_available,
+            fallback_performed: false,
+        };
     }
     coordinator.begin_fallback(system_index_available);
     let mut summary = discover_metadata_roots_in_with_callback(
@@ -502,113 +404,6 @@ pub fn discover_metadata_roots_in(
     )
 }
 
-/// 内部实现：仅在闭集内跨多卷公平轮询遍历目录，命中即实时上报候选。
-fn discover_metadata_roots_in_with_callback(
-    coordinator: &RootDiscoveryCoordinator,
-    volumes: LocalVolumeRoots,
-    priority_roots: Vec<PathBuf>,
-    agents: RootDiscoveryAgentScope,
-    on_candidate: &impl Fn(RootCandidate),
-) -> MetadataDiscoverySummary {
-    let total = u64::try_from(volumes.search_roots.len()).unwrap_or(u64::MAX);
-    let excluded_roots = volumes.excluded_roots.clone();
-    if coordinator.snapshot().lifecycle != crate::RootDiscoveryLifecycle::Running
-        && !coordinator.start(
-            RootDiscoveryStrategy::MetadataTraversal,
-            RootDiscoveryPlatform::Other,
-            RootDiscoveryScope::FullLocalVolumes,
-            total,
-        )
-    {
-        return MetadataDiscoverySummary::default();
-    }
-    let mut progress = record_volume_scope_gaps(coordinator, &volumes, total);
-    let mut queues = volumes
-        .search_roots
-        .into_iter()
-        .map(|root| VolumeQueue {
-            pending: priority_queue(&root, &priority_roots)
-                .into_iter()
-                .filter(|path| !is_discovery_path_excluded(path, &root, &excluded_roots))
-                .collect(),
-            completed: false,
-            traversal_root: root,
-        })
-        .collect::<Vec<_>>();
-    let mut visited = queues
-        .iter()
-        .flat_map(|queue| queue.pending.iter().cloned())
-        .collect::<HashSet<_>>();
-    let mut next_volume = 0_usize;
-    let worker_pool = MetadataWorkerPool::new(adaptive_worker_count(), agents, coordinator.clone());
-
-    while queues.iter().any(|queue| !queue.completed) {
-        if coordinator.is_cancel_requested() {
-            break;
-        }
-        let jobs = take_fair_jobs(&mut queues, adaptive_worker_count(), &mut next_volume);
-        if jobs.is_empty() {
-            mark_completed_queues(&mut queues, &mut progress);
-            continue;
-        }
-        let results = worker_pool.inspect(jobs);
-        for (volume, joined) in results {
-            if coordinator.is_cancel_requested() {
-                break;
-            }
-            progress.directories_checked = progress.directories_checked.saturating_add(1);
-            let Ok(result) = joined else {
-                progress.io_errors = progress.io_errors.saturating_add(1);
-                continue;
-            };
-            progress.file_names_checked = progress
-                .file_names_checked
-                .saturating_add(result.file_names_checked);
-            progress.permission_denied = progress
-                .permission_denied
-                .saturating_add(result.permission_denied);
-            progress.io_errors = progress.io_errors.saturating_add(result.io_errors);
-            progress.skipped = progress.skipped.saturating_add(result.skipped);
-            let traversal_root = queues[volume].traversal_root.clone();
-            for child in result.children {
-                if is_discovery_path_excluded(&child, &traversal_root, &excluded_roots) {
-                    progress.skipped = progress.skipped.saturating_add(1);
-                    continue;
-                }
-                if visited.insert(child.clone()) {
-                    queues[volume].pending.push_back(child);
-                }
-            }
-            for (path, evidence) in result.candidates {
-                if path_has_full_discovery_skip_directory_name(&path)
-                    || excluded_roots
-                        .iter()
-                        .any(|excluded| path.starts_with(excluded))
-                {
-                    progress.skipped = progress.skipped.saturating_add(1);
-                    continue;
-                }
-                submit_candidate(
-                    coordinator,
-                    path,
-                    evidence,
-                    RootDiscoveryStrategy::MetadataTraversal,
-                    agents,
-                    on_candidate,
-                );
-            }
-        }
-        mark_completed_queues(&mut queues, &mut progress);
-        coordinator.update_progress(progress);
-    }
-    coordinator.update_progress(progress);
-    coordinator.finish(false, true);
-    MetadataDiscoverySummary {
-        system_index_available: false,
-        fallback_performed: true,
-    }
-}
-
 /// Spotlight 等系统索引结果必须服从当前用户目录或本地卷边界。
 fn path_is_in_search_scope(path: &Path, volumes: &LocalVolumeRoots) -> bool {
     volumes
@@ -628,108 +423,6 @@ fn path_blocked_by_discovery_policy(path: &Path, volumes: &LocalVolumeRoots) -> 
     }
     path.ancestors()
         .any(path_has_full_discovery_skip_directory_name)
-}
-
-/// 每轮从不同卷各取一个目录，确保较大前序卷不会饿死后续卷。
-fn take_fair_jobs(
-    queues: &mut [VolumeQueue],
-    workers: usize,
-    next_volume: &mut usize,
-) -> Vec<(usize, PathBuf)> {
-    let mut jobs = Vec::new();
-    if queues.is_empty() {
-        return jobs;
-    }
-    let mut consecutive_empty = 0_usize;
-    while jobs.len() < workers && consecutive_empty < queues.len() {
-        let index = *next_volume % queues.len();
-        *next_volume = (index + 1) % queues.len();
-        if let Some(path) = queues[index].pending.pop_front() {
-            jobs.push((index, path));
-            consecutive_empty = 0;
-        } else {
-            consecutive_empty += 1;
-        }
-    }
-    jobs
-}
-
-/// 根据逻辑 CPU 自适应选择一到两个只读 worker。
-fn adaptive_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .clamp(1, crate::LOCAL_DISCOVERY_WORKER_LIMIT)
-}
-
-/// 把队列耗尽的卷计入完成数。
-fn mark_completed_queues(queues: &mut [VolumeQueue], progress: &mut RootDiscoveryProgress) {
-    for queue in queues {
-        if !queue.completed && queue.pending.is_empty() {
-            queue.completed = true;
-            progress.volumes_completed = progress.volumes_completed.saturating_add(1);
-        }
-    }
-}
-
-/// 读取一个目录的目录项元数据；此函数没有任何打开普通文件的入口。
-fn inspect_directory_metadata(
-    path: &Path,
-    agents: RootDiscoveryAgentScope,
-    coordinator: &RootDiscoveryCoordinator,
-) -> DirectoryResult {
-    let mut result = DirectoryResult::default();
-    if !crate::readers::glm::path_rules::is_allowed_glm_discovery_directory(path) {
-        return result;
-    }
-    if coordinator.is_cancel_requested() {
-        return result;
-    }
-    if is_obviously_network_path(path) {
-        result.skipped = 1;
-        return result;
-    }
-    let entries = match fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            result.permission_denied = 1;
-            return result;
-        }
-        Err(_) => {
-            result.io_errors = 1;
-            return result;
-        }
-    };
-    for entry in entries {
-        if coordinator.is_cancel_requested() {
-            break;
-        }
-        let Ok(entry) = entry else {
-            result.io_errors = result.io_errors.saturating_add(1);
-            continue;
-        };
-        let entry_path = entry.path();
-        if is_unselected_agent_directory(&entry_path, agents) {
-            result.skipped = result.skipped.saturating_add(1);
-            continue;
-        }
-        let Ok(metadata) = fs::symlink_metadata(&entry_path) else {
-            result.io_errors = result.io_errors.saturating_add(1);
-            continue;
-        };
-        if metadata_is_link_like(&metadata) {
-            result.skipped = result.skipped.saturating_add(1);
-            continue;
-        }
-        if metadata.is_dir() {
-            result.children.push(entry_path);
-        } else if metadata.is_file() {
-            result.file_names_checked = result.file_names_checked.saturating_add(1);
-            if let Some(candidate) = candidate_from_file_name(&entry_path, agents) {
-                result.candidates.push(candidate);
-            }
-        }
-    }
-    result
 }
 
 /// 仅为闭集内 Agent 按规范路径去重并提交候选，日志不得输出路径。
@@ -765,6 +458,8 @@ fn submit_candidate(
     }
 }
 
+#[cfg(test)]
+use scope::priority_queue;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

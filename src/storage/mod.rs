@@ -20,6 +20,7 @@ mod root_registry;
 mod scan_connection;
 mod schema;
 mod snapshot;
+mod snapshot_cpu;
 mod snapshot_ops;
 
 use std::path::{Path, PathBuf};
@@ -344,3 +345,6 @@ mod scan_publication_tests;
 mod tests;
 #[cfg(test)]
 mod wal_mode_tests;
+
+#[cfg(test)]
+mod snapshot_responsiveness_tests;

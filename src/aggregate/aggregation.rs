@@ -9,6 +9,15 @@ use crate::{Confidence, LocalUsageAggregate, TokenUsage, TokenUsageError};
 pub fn aggregate_canonical_usage(
     canonical: &CanonicalUsageSet,
 ) -> Result<LocalUsageAggregate, TokenUsageError> {
+    aggregate_canonical_usage_with_check(canonical, || Ok::<(), TokenUsageError>(()))
+}
+
+/// 在调用及来源遍历边界执行取消回调，保留原有逐字段聚合与错误顺序。
+pub(crate) fn aggregate_canonical_usage_with_check<E: From<TokenUsageError>>(
+    canonical: &CanonicalUsageSet,
+    mut check: impl FnMut() -> Result<(), E>,
+) -> Result<LocalUsageAggregate, E> {
+    check()?;
     let is_empty = canonical.calls.is_empty();
     let mut tokens = if is_empty {
         canonical.empty_tokens.clone()
@@ -30,6 +39,7 @@ pub fn aggregate_canonical_usage(
     let mut accounted_total = 0_u64;
 
     for call in &canonical.calls {
+        check()?;
         tokens = tokens.checked_add(&call.usage)?;
         accounted_total = accounted_total
             .checked_add(
@@ -50,6 +60,7 @@ pub fn aggregate_canonical_usage(
         thread_keys.insert(call.thread_key.clone());
         let mut source_counts_by_root = std::collections::BTreeMap::<&str, u64>::new();
         for provenance in &call.provenance {
+            check()?;
             root_ids.insert(provenance.root_id.clone());
             source_ids.insert(provenance.source_id.clone());
             let root_source_count = source_counts_by_root
@@ -75,6 +86,7 @@ pub fn aggregate_canonical_usage(
         confidence = lower_confidence(confidence, call.confidence);
     }
 
+    check()?;
     let call_count = u64::try_from(canonical.calls.len()).map_err(|_| TokenUsageError::Overflow)?;
     let thread_count = u64::try_from(thread_keys.len()).map_err(|_| TokenUsageError::Overflow)?;
     let root_count = u64::try_from(root_ids.len()).map_err(|_| TokenUsageError::Overflow)?;

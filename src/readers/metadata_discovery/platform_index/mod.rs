@@ -6,6 +6,9 @@ use crate::{RootDiscoveryAgentScope, RootDiscoveryCoordinator, RootDiscoveryScop
 
 use super::super::LocalVolumeRoots;
 
+#[cfg(any(target_os = "windows", test))]
+mod wait;
+
 /// 仅在平台索引能严格服从当前范围时使用加速查询。
 pub(super) fn should_query(scope: RootDiscoveryScope) -> bool {
     #[cfg(target_os = "windows")]
@@ -32,14 +35,17 @@ pub(super) fn query(
     volumes: &LocalVolumeRoots,
     coordinator: &RootDiscoveryCoordinator,
     agents: RootDiscoveryAgentScope,
-) -> (bool, Vec<PathBuf>) {
+    mut on_path: impl FnMut(PathBuf),
+) -> bool {
+    use std::future::IntoFuture;
+    use wait::{INDEX_OPERATION_TIMEOUT, wait_for_operation};
     use windows::Storage::Search::{FolderDepth, IndexerOption, QueryOptions};
     use windows::Storage::StorageFolder;
     use windows::core::HSTRING;
 
     let options = match QueryOptions::new() {
         Ok(options) => options,
-        Err(_) => return (false, Vec::new()),
+        Err(_) => return false,
     };
     if options.SetFolderDepth(FolderDepth::Deep).is_err()
         || options
@@ -50,9 +56,8 @@ pub(super) fn query(
             .and_then(|filter| filter.Append(&HSTRING::from(".jsonl")))
             .is_err()
     {
-        return (false, Vec::new());
+        return false;
     }
-    let mut paths = Vec::new();
     let mut any_query_succeeded = false;
     for root in &volumes.search_roots {
         if coordinator.is_cancel_requested() {
@@ -63,7 +68,14 @@ pub(super) fn query(
         else {
             continue;
         };
-        let Ok(folder) = folder_operation.join() else {
+        let Some(folder) = wait_for_operation(
+            folder_operation.clone().into_future(),
+            coordinator,
+            INDEX_OPERATION_TIMEOUT,
+            || {
+                let _ = folder_operation.Cancel();
+            },
+        ) else {
             continue;
         };
         let Ok(query) = folder.CreateFileQueryWithOptions(&options) else {
@@ -71,10 +83,20 @@ pub(super) fn query(
         };
         let mut offset = 0_u32;
         loop {
+            if coordinator.is_cancel_requested() {
+                break;
+            }
             let Ok(operation) = query.GetFilesAsync(offset, 512) else {
                 break;
             };
-            let Ok(files) = operation.join() else {
+            let Some(files) = wait_for_operation(
+                operation.clone().into_future(),
+                coordinator,
+                INDEX_OPERATION_TIMEOUT,
+                || {
+                    let _ = operation.Cancel();
+                },
+            ) else {
                 break;
             };
             any_query_succeeded = true;
@@ -83,7 +105,7 @@ pub(super) fn query(
             };
             for index in 0..size {
                 if coordinator.is_cancel_requested() {
-                    return (any_query_succeeded, Vec::new());
+                    return any_query_succeeded;
                 }
                 let Ok(file) = files.GetAt(index) else {
                     continue;
@@ -91,17 +113,20 @@ pub(super) fn query(
                 if let Ok(path) = file.Path() {
                     let path = PathBuf::from(path.to_string());
                     if super::scope::candidate_from_file_name(&path, agents).is_some() {
-                        paths.push(path);
+                        on_path(path);
                     }
                 }
             }
             if size < 512 {
                 break;
             }
-            offset = offset.saturating_add(size);
+            let Some(next_offset) = offset.checked_add(size) else {
+                break;
+            };
+            offset = next_offset;
         }
     }
-    (any_query_succeeded, paths)
+    any_query_succeeded
 }
 
 /// macOS 通过进程内 `NSMetadataQuery` 查询 Spotlight，结果仍逐项执行本地卷策略。
@@ -110,7 +135,8 @@ pub(super) fn query(
     _volumes: &LocalVolumeRoots,
     coordinator: &RootDiscoveryCoordinator,
     agents: RootDiscoveryAgentScope,
-) -> (bool, Vec<PathBuf>) {
+    mut on_path: impl FnMut(PathBuf),
+) -> bool {
     use std::time::{Duration, Instant};
 
     use objc2_foundation::{NSDate, NSMetadataQuery, NSPredicate, NSRunLoop, NSString};
@@ -120,12 +146,12 @@ pub(super) fn query(
     let Some(predicate) = NSPredicate::predicateFromMetadataQueryString(&NSString::from_str(
         "kMDItemFSName == '*.jsonl'cd",
     )) else {
-        return (false, Vec::new());
+        return false;
     };
     let query = NSMetadataQuery::new();
     query.setPredicate(Some(&predicate));
     if !query.startQuery() {
-        return (false, Vec::new());
+        return false;
     }
 
     let run_loop = NSRunLoop::currentRunLoop();
@@ -133,7 +159,7 @@ pub(super) fn query(
     while query.isGathering() && Instant::now() < deadline {
         if coordinator.is_cancel_requested() {
             query.stopQuery();
-            return (true, Vec::new());
+            return true;
         }
         run_loop.runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
     }
@@ -141,11 +167,10 @@ pub(super) fn query(
     // Apple 文档中 `NSMetadataItemPathKey` 的字面值是 `kMDItemPath`；用字面量避免
     // 读取 objc2 的 extern static（本 crate 禁止 unsafe-code）。
     let path_attribute = NSString::from_str("kMDItemPath");
-    let mut paths = Vec::new();
     for index in 0..query.resultCount() {
         if coordinator.is_cancel_requested() {
             query.stopQuery();
-            return (true, Vec::new());
+            return true;
         }
         let Some(path) = query
             .valueOfAttribute_forResultAtIndex(&path_attribute, index)
@@ -157,11 +182,11 @@ pub(super) fn query(
         if super::scope::candidate_from_file_name(&path, agents).is_some()
             && matches!(classify_local_path(&path), LocalPathStatus::ConfirmedLocal)
         {
-            paths.push(path);
+            on_path(path);
         }
     }
     query.stopQuery();
-    (true, paths)
+    true
 }
 
 /// 其他平台没有批准的系统索引加速器；调用方仍执行普通元数据兜底。
@@ -170,6 +195,7 @@ pub(super) fn query(
     _volumes: &LocalVolumeRoots,
     _coordinator: &RootDiscoveryCoordinator,
     _agents: RootDiscoveryAgentScope,
-) -> (bool, Vec<PathBuf>) {
-    (false, Vec::new())
+    _on_path: impl FnMut(PathBuf),
+) -> bool {
+    false
 }

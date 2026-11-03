@@ -1,6 +1,7 @@
 //! 本机来源的同步只读访问；异步调度和结果存储由调用方管理。
 pub mod claude;
 pub mod directory;
+pub mod directory_cursor;
 pub mod discovery;
 pub mod file_source;
 pub mod glm;

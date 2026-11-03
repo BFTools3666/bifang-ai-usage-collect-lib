@@ -1,5 +1,5 @@
-//! 单个目录的同步枚举与签名探测岛：一次 `spawn_blocking` 处理整目录，
-//! 绝不按 DirEntry 拆分 blocking 任务。
+//! 同步目录枚举与签名探测；生产调用按可续读分片消费，不同时保留整目录文件句柄。
+//! 整目录入口只作兼容壳，不按每条 DirEntry 创建 blocking 任务。
 
 use std::collections::HashMap;
 use std::fs;
@@ -9,12 +9,17 @@ use std::sync::Arc;
 use crate::{SourceFileObservation, source_file_needs_visit};
 
 use crate::readers::CancellationToken;
+use crate::readers::LocalError;
+use crate::readers::directory_cursor::DirectoryCursor;
 use crate::readers::discovery::{metadata_is_link_like, path_key};
 use crate::readers::file_source::{
     RolloutFileInspection, RolloutProbeBudget, ValidatedRolloutFile, inspect_rollout_file,
     is_rollout_jsonl, modified_epoch_ms,
 };
-use crate::readers::{LocalError, LocalErrorKind};
+
+#[cfg(test)]
+#[path = "directory_chunk_tests.rs"]
+mod chunk_tests;
 
 /// 目录访问后需要由 async 扫描壳继续处理的动作。
 pub enum EntryAction {
@@ -63,7 +68,19 @@ pub struct VisitWindow {
     pub known_sources: Arc<HashMap<String, SourceFileObservation>>,
 }
 
-/// 读取并预检一个目录；预算与取消在岛内边界检查。
+/// 单个分片限制工作集，不限制目录总项数或总批次数。
+const DIRECTORY_CHUNK_ENTRIES: usize = 128;
+
+/// 一个可续读目录分片；必须消费 continuation 才能证明整目录枚举完成。
+/// outcome 的 enumeration_complete 只表示本片未因错误、取消或预算中断。
+pub struct DirectoryVisitChunk {
+    /// 本片的脱敏计数及最多一个持有原始只读句柄的匹配文件。
+    pub outcome: DirectoryVisitOutcome,
+    /// 下一片继续使用的同一目录句柄；None 表示目录结束或本次访问已中断。
+    pub continuation: Option<DirectoryCursor>,
+}
+
+/// 显式整目录兼容入口；产品和包装层应使用分片入口以限制同时持有的文件句柄。
 pub fn visit_directory(
     directory: PathBuf,
     root_path: PathBuf,
@@ -72,6 +89,57 @@ pub fn visit_directory(
     cancellation: &CancellationToken,
     mut probe_budget: RolloutProbeBudget,
 ) -> Result<DirectoryVisitOutcome, LocalError> {
+    let mut cursor = DirectoryCursor::new(directory);
+    let mut result = DirectoryVisitOutcome {
+        remaining_entries,
+        probe_budget,
+        permission_denied: 0,
+        skipped: 0,
+        warnings: 0,
+        actions: Vec::new(),
+        enumeration_complete: true,
+        cancelled: false,
+        budget_exhausted: false,
+    };
+    loop {
+        let chunk = visit_directory_chunk(
+            cursor,
+            root_path.clone(),
+            remaining_entries,
+            window,
+            cancellation,
+            probe_budget,
+        )?;
+        let outcome = chunk.outcome;
+        remaining_entries = outcome.remaining_entries;
+        probe_budget = outcome.probe_budget;
+        result.remaining_entries = remaining_entries;
+        result.probe_budget = probe_budget;
+        result.permission_denied = result
+            .permission_denied
+            .saturating_add(outcome.permission_denied);
+        result.skipped = result.skipped.saturating_add(outcome.skipped);
+        result.warnings = result.warnings.saturating_add(outcome.warnings);
+        result.actions.extend(outcome.actions);
+        result.enumeration_complete &= outcome.enumeration_complete;
+        result.cancelled |= outcome.cancelled;
+        result.budget_exhausted |= outcome.budget_exhausted;
+        let Some(next) = chunk.continuation else {
+            return Ok(result);
+        };
+        cursor = next;
+    }
+}
+
+/// 读取并预检一个目录；预算与取消在岛内边界检查。
+pub fn visit_directory_chunk(
+    mut cursor: DirectoryCursor,
+    root_path: PathBuf,
+    mut remaining_entries: u64,
+    window: &VisitWindow,
+    cancellation: &CancellationToken,
+    mut probe_budget: RolloutProbeBudget,
+) -> Result<DirectoryVisitChunk, LocalError> {
     let mut permission_denied = 0_u64;
     let mut skipped = 0_u64;
     let mut warnings = 0_u64;
@@ -79,25 +147,28 @@ pub fn visit_directory(
     let mut enumeration_complete = true;
     let mut cancelled = false;
     let mut budget_exhausted = false;
-    let mut entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) => {
-            return Err(if error.kind() == std::io::ErrorKind::PermissionDenied {
-                LocalError::new(LocalErrorKind::PermissionDenied, "directory unreadable")
-            } else {
-                LocalError::new(LocalErrorKind::SourceUnavailable, "directory unreadable")
-            });
-        }
-    };
+    let mut continuation = None;
+    let mut processed = 0;
     loop {
         if cancellation.is_cancelled() {
             cancelled = true;
             enumeration_complete = false;
             break;
         }
-        let Some(entry) = entries.next() else {
+        if processed == DIRECTORY_CHUNK_ENTRIES {
+            continuation = Some(cursor);
             break;
+        }
+        let unopened = !cursor.started();
+        let entry = match cursor.next_entry() {
+            Ok(Some(entry)) => Ok(entry),
+            Ok(None) => break,
+            Err(error) if unopened => {
+                return Err(crate::readers::file_source::map_source_io_error(error));
+            }
+            Err(error) => Err(error),
         };
+        processed += 1;
         if remaining_entries == 0 {
             enumeration_complete = false;
             budget_exhausted = true;
@@ -175,6 +246,8 @@ pub fn visit_directory(
                     relative_label,
                     source,
                 });
+                continuation = Some(cursor);
+                break;
             }
             RolloutFileInspection::Rejected => {
                 actions.push(EntryAction::RejectLabel(relative_label));
@@ -198,15 +271,18 @@ pub fn visit_directory(
             }
         }
     }
-    Ok(DirectoryVisitOutcome {
-        remaining_entries,
-        probe_budget,
-        permission_denied,
-        skipped,
-        warnings,
-        actions,
-        enumeration_complete,
-        cancelled,
-        budget_exhausted,
+    Ok(DirectoryVisitChunk {
+        outcome: DirectoryVisitOutcome {
+            remaining_entries,
+            probe_budget,
+            permission_denied,
+            skipped,
+            warnings,
+            actions,
+            enumeration_complete,
+            cancelled,
+            budget_exhausted,
+        },
+        continuation,
     })
 }

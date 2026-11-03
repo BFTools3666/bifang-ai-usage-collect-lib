@@ -3,11 +3,12 @@
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 
 use crate::{
-    CanonicalUsageSet, LocalIndexState, RootActivationState, SessionTokenSnapshot,
-    SourceProvenance, attach_session_snapshots, canonicalize_usage_calls,
+    CanonicalUsageSet, LocalIndexState, RootActivationState, ScanCancellation,
+    SessionTokenSnapshot, SourceProvenance,
 };
 
 use super::call_store::{from_sql_u64, row_to_usage_call};
+use super::snapshot_cpu::{check_cancelled, discard_calls, finish_canonical_read};
 use super::{
     DiscoveryMethod, IntoLocalResult, LocalError, LocalErrorKind, RootRecord, UsageSnapshot,
     coverage_state_from_label,
@@ -71,8 +72,30 @@ pub(super) async fn load_canonical_snapshot(
     connection: &sea_orm::DatabaseConnection,
     parser_version: u32,
 ) -> Result<CanonicalUsageSet, LocalError> {
+    load_canonical_snapshot_with_cancellation(
+        connection,
+        parser_version,
+        &ScanCancellation::default(),
+    )
+    .await
+}
+
+/// 在同一已发布快照事务内读取规范调用，并在页及 CPU 边界响应扫描取消。
+pub(super) async fn load_canonical_snapshot_with_cancellation(
+    connection: &sea_orm::DatabaseConnection,
+    parser_version: u32,
+    cancellation: &ScanCancellation,
+) -> Result<CanonicalUsageSet, LocalError> {
+    check_cancelled(cancellation)?;
     let transaction = connection.begin().await.into_local_result()?;
-    let canonical = load_canonical_calls(&transaction, parser_version).await?;
+    let canonical = load_canonical_calls_since_with_cancellation(
+        &transaction,
+        parser_version,
+        i64::MIN,
+        cancellation,
+    )
+    .await?;
+    // 只读提交不发布业务数据；取消由随后拥有集合的摘要 worker 检查，避免在此同步析构大集合。
     transaction.commit().await.into_local_result()?;
     Ok(canonical)
 }
@@ -245,6 +268,9 @@ pub(crate) async fn load_root_records<C: ConnectionTrait>(
     Ok(roots)
 }
 
+/// 单页只限制 SQL 行缓冲与连续解码工作量，不限制完整读取的总行数。
+const CALL_READ_PAGE_SIZE: usize = 256;
+
 /// 从指定数据库快照读取当前 generation 调用并由 core 执行 canonical 去重。
 pub(crate) async fn load_canonical_calls<C: ConnectionTrait>(
     connection: &C,
@@ -259,8 +285,33 @@ pub(crate) async fn load_canonical_calls_since<C: ConnectionTrait>(
     parser_version: u32,
     cutoff_epoch_ms: i64,
 ) -> Result<CanonicalUsageSet, LocalError> {
-    let rows = connection
-        .query_all_raw(statement(
+    load_canonical_calls_since_with_cancellation(
+        connection,
+        parser_version,
+        cutoff_epoch_ms,
+        &ScanCancellation::default(),
+    )
+    .await
+}
+
+/// 每次最多解码一页当前代调用，取消或失败不返回部分 canonical 事实。
+pub(super) async fn load_canonical_calls_since_with_cancellation<C: ConnectionTrait>(
+    connection: &C,
+    parser_version: u32,
+    cutoff_epoch_ms: i64,
+    cancellation: &ScanCancellation,
+) -> Result<CanonicalUsageSet, LocalError> {
+    let mut calls = Vec::new();
+    let read_calls = async {
+    let mut cursor: Option<(i64, String, String, String)> = None;
+    loop {
+        check_cancelled(cancellation)?;
+        let seek = if cursor.is_some() {
+            "AND (u.occurred_at_epoch_ms, u.logical_call_id, f.root_id, f.source_id) > (?3, ?4, ?5, ?6)"
+        } else {
+            ""
+        };
+        let sql = format!(
             "SELECT u.logical_call_id, u.occurred_at_epoch_ms, u.model,
                     u.reasoning_effort, u.project_key, u.thread_key,
                     u.project_label, u.thread_label,
@@ -278,17 +329,46 @@ pub(crate) async fn load_canonical_calls_since<C: ConnectionTrait>(
                AND r.enabled = 1
                AND f.generation = u.generation
                AND u.occurred_at_epoch_ms >= ?2
-             ORDER BY u.occurred_at_epoch_ms, u.logical_call_id, f.root_id, f.source_id",
-            vec![i64::from(parser_version).into(), cutoff_epoch_ms.into()],
-        ))
-        .await
-        .into_local_result()?;
+             {seek}
+             ORDER BY u.occurred_at_epoch_ms, u.logical_call_id, f.root_id, f.source_id
+             LIMIT {CALL_READ_PAGE_SIZE}"
+        );
+        let mut values = vec![i64::from(parser_version).into(), cutoff_epoch_ms.into()];
+        if let Some((occurred, logical_call, root, source)) = &cursor {
+            values.extend([
+                (*occurred).into(), logical_call.clone().into(),
+                root.clone().into(), source.clone().into(),
+            ]);
+        }
+        let rows = connection.query_all_raw(statement(&sql, values)).await.into_local_result()?;
+        check_cancelled(cancellation)?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            check_cancelled(cancellation)?;
+            let call = row_to_usage_call(&row)?;
+            cursor = Some((
+                call.occurred_at_epoch_ms,
+                call.logical_call_id.clone(),
+                row.try_get_by_index(22).into_local_result()?,
+                row.try_get_by_index(21).into_local_result()?,
+            ));
+            calls.push(call);
+        }
+        #[cfg(test)]
+        super::snapshot_responsiveness_tests::after_calls_page();
+        tokio::task::yield_now().await;
+    }
     #[cfg(test)]
     super::read_snapshot_tests::pause_after_calls_query().await;
-    let mut calls = Vec::with_capacity(rows.len());
-    for row in &rows {
-        calls.push(row_to_usage_call(row)?);
+    check_cancelled(cancellation)
+    }.await;
+    if let Err(error) = read_calls {
+        discard_calls(calls).await;
+        return Err(error);
     }
+    // 兼容快照仍保留原始 SQL 排序与 first-wins；行解码及归并由阻塞任务拥有。
     let snapshot_rows = connection
         .query_all_raw(statement(
             "SELECT s.thread_key, s.occurred_at_epoch_ms, s.total_tokens, s.logical_call_id,
@@ -305,19 +385,21 @@ pub(crate) async fn load_canonical_calls_since<C: ConnectionTrait>(
             vec![i64::from(parser_version).into(), cutoff_epoch_ms.into()],
         ))
         .await
-        .into_local_result()?;
-    let mut snapshots = Vec::with_capacity(snapshot_rows.len());
-    for row in &snapshot_rows {
-        snapshots.push(row_to_session_snapshot(row)?);
-    }
-    Ok(attach_session_snapshots(
-        canonicalize_usage_calls(calls),
-        snapshots,
-    ))
+        .into_local_result();
+    let snapshot_rows = match snapshot_rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            discard_calls(calls).await;
+            return Err(error);
+        }
+    };
+    finish_canonical_read(calls, snapshot_rows, cancellation).await
 }
 
 /// 将数据库行严格解码为会话 Token 快照，拒绝越界或损坏数值。
-fn row_to_session_snapshot(row: &sea_orm::QueryResult) -> Result<SessionTokenSnapshot, LocalError> {
+pub(super) fn row_to_session_snapshot(
+    row: &sea_orm::QueryResult,
+) -> Result<SessionTokenSnapshot, LocalError> {
     Ok(SessionTokenSnapshot {
         thread_key: row.try_get_by_index(0).into_local_result()?,
         occurred_at_epoch_ms: row.try_get_by_index(1).into_local_result()?,
