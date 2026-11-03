@@ -1,7 +1,7 @@
 //! 三种内置 JSONL 格式的协议适配；实际计量逻辑仍只由各自解析器实现。
 
 use super::{ParseRequest, ParsedUsage, ParserDescriptor, UsageEmitter, UsageParser};
-use crate::readers::{claude::jsonl as claude, grok::jsonl as grok, jsonl};
+use crate::readers::{claude::jsonl as claude, glm::jsonl as glm, grok::jsonl as grok, jsonl};
 use crate::{LocalError, SourceClientKind};
 use std::io::Read;
 
@@ -117,6 +117,47 @@ impl UsageParser for GrokParser {
             max_line_bytes,
         } = request;
         let report = grok::parse_grok_jsonl_stream(
+            reader,
+            max_line_bytes,
+            &mut context,
+            provenance,
+            cancellation,
+            emit,
+        )?;
+        Ok(ParsedUsage { context, report })
+    }
+}
+
+/// GLM（Z Code CLI）模型 I/O 会话文件的解析协议实现。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GlmParser;
+
+impl UsageParser for GlmParser {
+    /// GLM 会话身份续读上下文。
+    type Context = glm::GlmJsonlParseContext;
+    /// 保留 GLM 模型 I/O 告警与检查点的原生报告。
+    type Report = glm::GlmJsonlParseReport;
+    /// 标识 GLM 模型 I/O 用量的解析语义版本。
+    fn descriptor(&self) -> ParserDescriptor {
+        ParserDescriptor {
+            id: "glm-model-io",
+            version: SourceClientKind::Glm.parser_version(),
+        }
+    }
+    /// 仅输出带可信用量的 `model_io` 事件并保留原始报告。
+    fn parse(
+        &self,
+        reader: &mut dyn Read,
+        request: ParseRequest<'_, Self::Context>,
+        emit: &mut UsageEmitter<'_>,
+    ) -> Result<ParsedUsage<Self::Context, Self::Report>, LocalError> {
+        let ParseRequest {
+            mut context,
+            provenance,
+            cancellation,
+            max_line_bytes,
+        } = request;
+        let report = glm::parse_glm_jsonl_stream(
             reader,
             max_line_bytes,
             &mut context,

@@ -70,6 +70,8 @@ pub enum RootCandidateEvidence {
     ClaudeSubagent,
     /// `sessions/<cwd>/<session>/updates.jsonl` 完成轮次用量文件。
     GrokSessionUpdates,
+    /// rollout 根下 `model-io-sess_*.jsonl` 模型 I/O 用量文件。
+    GlmModelIoUpdates,
 }
 
 /// 发现阶段产生的待确认候选，可由统计库保存并恢复。

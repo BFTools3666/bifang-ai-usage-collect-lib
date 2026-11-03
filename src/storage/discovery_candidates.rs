@@ -53,6 +53,10 @@ fn validate(candidate: &RootCandidate, client: SourceClientKind) -> Result<(), L
                 SourceClientKind::GrokBuildCli,
                 RootCandidateEvidence::GrokSessionUpdates
             )
+            | (
+                SourceClientKind::Glm,
+                RootCandidateEvidence::GlmModelIoUpdates
+            )
     );
     if candidate.client != client
         || !evidence_matches
@@ -87,6 +91,7 @@ fn evidence_label(value: RootCandidateEvidence) -> &'static str {
         RootCandidateEvidence::ClaudeTranscript => "claude_transcript",
         RootCandidateEvidence::ClaudeSubagent => "claude_subagent",
         RootCandidateEvidence::GrokSessionUpdates => "grok_updates",
+        RootCandidateEvidence::GlmModelIoUpdates => "glm_model_io",
     }
 }
 
@@ -111,6 +116,7 @@ fn decode(row: QueryResult, client: SourceClientKind) -> Result<RootCandidate, L
             "claude_transcript" => RootCandidateEvidence::ClaudeTranscript,
             "claude_subagent" => RootCandidateEvidence::ClaudeSubagent,
             "grok_updates" => RootCandidateEvidence::GrokSessionUpdates,
+            "glm_model_io" => RootCandidateEvidence::GlmModelIoUpdates,
             _ => return Err(invalid()),
         },
     };
@@ -220,5 +226,62 @@ impl LocalIndex {
             })
             .await
             .into_local_result()
+    }
+}
+
+#[cfg(test)]
+mod glm_tests {
+    use super::*;
+
+    /// GLM 发现位置在独占库中真实保存、恢复并确认，拒绝其他 Agent 接管。
+    #[tokio::test]
+    async fn glm_candidate_persists_and_confirms_in_its_own_database() {
+        let temp = tempfile::tempdir().expect("isolated app-data exists");
+        let root = temp.path().join("rollout");
+        let candidate = RootCandidate {
+            id: stable_id(
+                SourceClientKind::Glm.candidate_namespace(),
+                &path_key(&root),
+            ),
+            client: SourceClientKind::Glm,
+            absolute_path: root.clone(),
+            strategy: RootDiscoveryStrategy::MetadataTraversal,
+            evidence: RootCandidateEvidence::GlmModelIoUpdates,
+        };
+        let mut index = LocalIndex::open(temp.path(), Path::new("glm.db"), SourceClientKind::Glm)
+            .await
+            .expect("GLM database opens");
+        assert!(
+            index
+                .save_discovery_candidate(&candidate)
+                .await
+                .expect("GLM candidate saves")
+        );
+        assert_eq!(
+            index
+                .discovery_candidates()
+                .await
+                .expect("GLM candidate restores"),
+            vec![candidate.clone()]
+        );
+        let confirmed = index
+            .confirm_discovery_candidate(&candidate, "GLM")
+            .await
+            .expect("GLM candidate confirms");
+        assert_eq!(confirmed.root_id, stable_id("glm-root", &path_key(&root)));
+        assert!(
+            index
+                .discovery_candidates()
+                .await
+                .expect("confirmed candidate is removed")
+                .is_empty()
+        );
+        drop(index);
+        assert!(
+            LocalIndex::open(temp.path(), Path::new("glm.db"), SourceClientKind::Codex)
+                .await
+                .is_err()
+        );
+        assert!(!temp.path().join("codex.db").exists());
     }
 }

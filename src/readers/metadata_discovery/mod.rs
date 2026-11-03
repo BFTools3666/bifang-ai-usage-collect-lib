@@ -17,9 +17,9 @@ use crate::{
 use super::current_user_home;
 use super::discovery::metadata_is_link_like;
 use super::{
-    CancellationToken, ClaudeDiscoveryInputs, DiscoveryInputs, GrokDiscoveryInputs,
-    LocalVolumeRoots, discover_claude_quick, discover_grok_quick, discover_quick,
-    is_obviously_network_path, validate_local_plain_directory,
+    CancellationToken, ClaudeDiscoveryInputs, DiscoveryInputs, GlmDiscoveryInputs,
+    GrokDiscoveryInputs, LocalVolumeRoots, discover_claude_quick, discover_glm_quick,
+    discover_grok_quick, discover_quick, is_obviously_network_path, validate_local_plain_directory,
 };
 
 mod platform_index;
@@ -335,12 +335,17 @@ fn inspect_explicit_environment_candidates(
         .then_some(grok_home)
         .flatten()
         .filter(|path| path.is_absolute());
+    let glm_home_dir = agents
+        .contains(SourceClientKind::Glm)
+        .then(|| home_dir.clone())
+        .flatten()
+        .filter(|path| path.is_absolute());
     let home_dir = agents
         .contains(SourceClientKind::GrokBuildCli)
         .then_some(home_dir)
         .flatten()
         .filter(|path| path.is_absolute());
-    let (codex_result, claude_result, grok_result) = std::thread::scope(|scope| {
+    let (codex_result, claude_result, grok_result, glm_result) = std::thread::scope(|scope| {
         let codex_handle = codex_home.map(|codex_home| {
             let cancellation = cancellation.clone();
             scope.spawn(move || {
@@ -365,6 +370,11 @@ fn inspect_explicit_environment_candidates(
                 )
             })
         });
+        // 快速签名同样保持最多两个并发读取者，先回收首批再启动其余客户端。
+        let codex_result =
+            codex_handle.map(|handle| handle.join().expect("codex quick discovery panicked"));
+        let claude_result =
+            claude_handle.map(|handle| handle.join().expect("claude quick discovery panicked"));
         let grok_handle = (grok_home.is_some() || home_dir.is_some()).then(|| {
             let cancellation = cancellation.clone();
             scope.spawn(move || {
@@ -378,10 +388,23 @@ fn inspect_explicit_environment_candidates(
                 )
             })
         });
+        let glm_handle = glm_home_dir.map(|home_dir| {
+            let cancellation = cancellation.clone();
+            scope.spawn(move || {
+                discover_glm_quick(
+                    &GlmDiscoveryInputs {
+                        home_dir: Some(home_dir),
+                        registered_roots: Vec::new(),
+                    },
+                    &cancellation,
+                )
+            })
+        });
         (
-            codex_handle.map(|handle| handle.join().expect("codex quick discovery panicked")),
-            claude_handle.map(|handle| handle.join().expect("claude quick discovery panicked")),
+            codex_result,
+            claude_result,
             grok_handle.map(|handle| handle.join().expect("grok quick discovery panicked")),
+            glm_handle.map(|handle| handle.join().expect("glm quick discovery panicked")),
         )
     });
 
@@ -405,6 +428,15 @@ fn inspect_explicit_environment_candidates(
         );
     }
     if let Some(result) = grok_result {
+        merge_coverage(&mut inspection, &result.coverage);
+        inspection.candidates.extend(
+            result
+                .roots
+                .into_iter()
+                .map(|root| (root.path, root.evidence)),
+        );
+    }
+    if let Some(result) = glm_result {
         merge_coverage(&mut inspection, &result.coverage);
         inspection.candidates.extend(
             result
@@ -645,6 +677,9 @@ fn inspect_directory_metadata(
     coordinator: &RootDiscoveryCoordinator,
 ) -> DirectoryResult {
     let mut result = DirectoryResult::default();
+    if !crate::readers::glm::path_rules::is_allowed_glm_discovery_directory(path) {
+        return result;
+    }
     if coordinator.is_cancel_requested() {
         return result;
     }
@@ -711,6 +746,7 @@ fn submit_candidate(
             SourceClientKind::ClaudeCode
         }
         RootCandidateEvidence::GrokSessionUpdates => SourceClientKind::GrokBuildCli,
+        RootCandidateEvidence::GlmModelIoUpdates => SourceClientKind::Glm,
     };
     if !agents.contains(client) {
         return;

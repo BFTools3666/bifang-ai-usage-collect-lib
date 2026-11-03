@@ -7,6 +7,9 @@ use crate::readers::file_source::{
     ValidatedRolloutFile, file_identity, is_rollout_jsonl, map_source_io_error, modified_epoch_ms,
     same_opened_file,
 };
+use crate::readers::glm::path_rules::{
+    glm_session_seed, is_allowed_glm_root, is_glm_model_io_path,
+};
 use crate::readers::grok::path_rules::{
     grok_project_seed, grok_session_seed, is_grok_updates_path,
 };
@@ -389,6 +392,82 @@ pub use read::{
     JsonlFormat, USAGE_READ_REPORT_SCHEMA_VERSION, UsageReadOptions, UsageReadReport,
     read_usage_file,
 };
+
+/// 打开 GLM（Z Code CLI）来源并观察文件身份，不读取或保存客户端解析检查点。
+///
+/// 合法来源只能是 rollout 根内平铺的 `model-io-sess_*.jsonl` 普通文件；
+/// 线程种子取文件名中的会话标识，GLM 无项目维度。
+pub fn open_glm_source(request: SourceFileRequest) -> Result<OpenedUsageFile, LocalError> {
+    if !is_allowed_glm_root(&request.root_path) {
+        return Err(LocalError::new(
+            LocalErrorKind::InvalidPath,
+            "GLM root is outside the approved rollout boundary",
+        ));
+    }
+    let request = normalize_request(request)?;
+    if !is_allowed_glm_root(&request.root_path) {
+        return Err(LocalError::new(
+            LocalErrorKind::InvalidPath,
+            "GLM root is outside the approved rollout boundary",
+        ));
+    }
+    let relative =
+        crate::readers::file_source::source_relative_path(&request.root_path, &request.file_path)?;
+    if !is_glm_model_io_path(relative) {
+        return Err(LocalError::new(
+            LocalErrorKind::InvalidPath,
+            "source is outside the approved GLM rollout layout",
+        ));
+    }
+    let SourceFileRequest {
+        root_path,
+        file_path,
+        root_id,
+    } = request;
+    let mut file = File::open(&file_path).map_err(map_source_io_error)?;
+    let metadata = file.metadata().map_err(map_source_io_error)?;
+    let current_metadata = fs::symlink_metadata(&file_path).map_err(map_source_io_error)?;
+    if !metadata.is_file()
+        || !current_metadata.is_file()
+        || metadata_is_link_like(&current_metadata)
+        || walk_ancestors_for_link_component(&file_path).map_err(map_source_io_error)?
+        || !same_opened_file(&file, &file_path, &metadata, &current_metadata)
+            .map_err(map_source_io_error)?
+    {
+        return Err(LocalError::new(
+            LocalErrorKind::InvalidPath,
+            "GLM rollout source changed during validation",
+        ));
+    }
+    let normalized_path = fs::canonicalize(&file_path).map_err(map_source_io_error)?;
+    let relative = normalized_path.strip_prefix(&root_path).map_err(|_| {
+        LocalError::new(LocalErrorKind::InvalidPath, "GLM model-io escaped its root")
+    })?;
+    if !is_glm_model_io_path(relative) {
+        return Err(LocalError::new(
+            LocalErrorKind::InvalidPath,
+            "GLM model-io path is outside the approved rollout layout",
+        ));
+    }
+    let relative_label = path_key(relative);
+    let thread_seed = glm_session_seed(relative).unwrap_or_else(|| relative_label.clone());
+    let source_id = stable_id("glm-source", &format!("{root_id}\u{0}{relative_label}"));
+    let identity = file_identity(&mut file)?;
+    Ok(OpenedUsageFile {
+        file,
+        metadata: UsageFileMetadata {
+            archived: false,
+            source_id,
+            root_id,
+            relative_label,
+            fingerprint: identity,
+            observed_size: metadata.len(),
+            modified_at_epoch_ms: modified_epoch_ms(&metadata),
+            project_seed: None,
+            thread_seed,
+        },
+    })
+}
 
 /// 在打开 Codex 路径之前拒绝认证文件、根外路径和非会话布局。
 fn validate_rollout_request(request: &SourceFileRequest) -> Result<bool, LocalError> {

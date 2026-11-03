@@ -1,16 +1,17 @@
 //! 无产品上下文的单文件获取入口，便于普通应用和安全的 FFI 包装层使用。
 
 use super::{
-    OpenedUsageFile, SourceFileRequest, open_claude_source, open_grok_source, open_rollout_source,
+    OpenedUsageFile, SourceFileRequest, open_claude_source, open_glm_source, open_grok_source,
+    open_rollout_source,
 };
 use crate::parsing::{
-    ClaudeParser, CodexParser, GrokParser, ParseRequest, ParserDescriptor, ReadRange, UsageEmitter,
-    UsageParser, read_observed_prefix,
+    ClaudeParser, CodexParser, GlmParser, GrokParser, ParseRequest, ParserDescriptor, ReadRange,
+    UsageEmitter, UsageParser, read_observed_prefix,
 };
 use crate::readers::file_source::{
     RolloutFileInspection, RolloutProbeBudget, inspect_rollout_file,
 };
-use crate::readers::{claude::jsonl as claude, grok::jsonl as grok, jsonl};
+use crate::readers::{claude::jsonl as claude, glm::jsonl as glm, grok::jsonl as grok, jsonl};
 use crate::{
     CancellationSignal, LocalError, LocalErrorKind, SessionTokenSnapshot, SourceProvenance,
 };
@@ -27,6 +28,8 @@ pub enum JsonlFormat {
     Claude,
     /// Grok 已完成轮次 updates。
     Grok,
+    /// GLM（Z Code CLI）模型 I/O 会话文件。
+    Glm,
 }
 
 impl JsonlFormat {
@@ -36,6 +39,7 @@ impl JsonlFormat {
             Self::Codex => CodexParser.descriptor(),
             Self::Claude => ClaudeParser.descriptor(),
             Self::Grok => GrokParser.descriptor(),
+            Self::Glm => GlmParser.descriptor(),
         }
     }
 }
@@ -164,6 +168,7 @@ pub(crate) fn read_usage_file_observed(
         }
         JsonlFormat::Claude => open_claude_source(request)?,
         JsonlFormat::Grok => open_grok_source(request)?,
+        JsonlFormat::Glm => open_glm_source(request)?,
     };
     let metadata = opened.metadata().clone();
     read_opened(format, opened, options, cancellation, emit).map(|report| (report, Some(metadata)))
@@ -260,6 +265,31 @@ fn read_opened(
                         &info.thread_seed,
                         info.project_seed.as_deref(),
                     ),
+                    &provenance,
+                    cancellation,
+                )
+                .max_line_bytes(options.max_line_bytes),
+                emit,
+            )?;
+            let r = parsed.report;
+            (
+                r.calls_emitted,
+                r.bytes_consumed,
+                r.checkpoint.committed_bytes,
+                r.checkpoint.trailing_bytes,
+                r.checkpoint.discarding_oversized_line,
+                r.warnings.total(),
+                r.cancelled,
+                Vec::new(),
+            )
+        }
+        JsonlFormat::Glm => {
+            let parsed = read_observed_prefix(
+                &GlmParser,
+                file,
+                range,
+                ParseRequest::new(
+                    glm::GlmJsonlParseContext::new(&info.thread_seed),
                     &provenance,
                     cancellation,
                 )

@@ -3,6 +3,7 @@ pub mod claude;
 pub mod directory;
 pub mod discovery;
 pub mod file_source;
+pub mod glm;
 pub mod grok;
 pub mod jsonl;
 pub mod jsonl_lines;
@@ -30,6 +31,7 @@ pub use discovery::metadata_is_link_like;
 pub mod metadata_discovery;
 pub use claude::{ClaudeDiscoveryInputs, discover_claude_quick};
 pub use discovery::validate_local_plain_directory;
+pub use glm::{GlmDiscoveryInputs, discover_glm_quick};
 #[cfg(test)]
 pub(crate) use grok::jsonl::{
     PRODUCTION_GROK_SESSION_ENVELOPE_JSONL, SYNTHETIC_GROK_UPDATES_JSONL,

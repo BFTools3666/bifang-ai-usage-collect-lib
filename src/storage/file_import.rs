@@ -52,6 +52,7 @@ impl PreparedFileIndex {
             JsonlFormat::Codex => SourceClientKind::Codex,
             JsonlFormat::Claude => SourceClientKind::ClaudeCode,
             JsonlFormat::Grok => SourceClientKind::GrokBuildCli,
+            JsonlFormat::Glm => SourceClientKind::Glm,
         };
         crate::validate_source_root_id(client, &request.root_id).map_err(|_| {
             LocalError::new(

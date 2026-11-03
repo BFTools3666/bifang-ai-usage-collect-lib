@@ -12,6 +12,7 @@ pub fn empty_token_usage_for_provider(provider: ProviderKind) -> TokenUsage {
         }
         ProviderKind::CombinedLocalAgents => TokenUsage::zero(),
         ProviderKind::GrokSessionJsonl => TokenUsage::zero(),
+        ProviderKind::GlmModelIoJsonl => TokenUsage::zero(),
         ProviderKind::RolloutJsonl => TokenUsage::zero(),
         ProviderKind::WorkbuddyProjectJsonl => {
             TokenUsage::zero_with_component_availability(true, false, false)
@@ -29,6 +30,8 @@ pub enum ProviderKind {
     ClaudeTranscriptJsonl,
     /// 从用户授权 Grok home 中的 `sessions/**/updates.jsonl` 观察到的事实。
     GrokSessionJsonl,
+    /// 从用户授权 GLM（Z Code CLI）rollout 根中的 `model-io-sess_*.jsonl` 观察到的事实。
+    GlmModelIoJsonl,
     /// 从多个已开启本机 Agent 的独立 provider 联合得到的只读事实。
     CombinedLocalAgents,
     /// 从用户授权 WorkBuddy 本机根中的项目 JSONL 观察到的逐请求事实。
@@ -42,6 +45,7 @@ impl ProviderKind {
             Self::RolloutJsonl => Some(crate::SourceClientKind::Codex),
             Self::ClaudeTranscriptJsonl => Some(crate::SourceClientKind::ClaudeCode),
             Self::GrokSessionJsonl => Some(crate::SourceClientKind::GrokBuildCli),
+            Self::GlmModelIoJsonl => Some(crate::SourceClientKind::Glm),
             Self::WorkbuddyProjectJsonl => Some(crate::SourceClientKind::WorkBuddy),
             Self::CombinedLocalAgents => None,
         }
@@ -53,6 +57,7 @@ impl ProviderKind {
             Self::RolloutJsonl
             | Self::ClaudeTranscriptJsonl
             | Self::GrokSessionJsonl
+            | Self::GlmModelIoJsonl
             | Self::CombinedLocalAgents
             | Self::WorkbuddyProjectJsonl => TotalTokenAccounting::Observed,
         }
@@ -64,6 +69,7 @@ impl ProviderKind {
             Self::RolloutJsonl => "当前 CODEX_HOME",
             Self::ClaudeTranscriptJsonl => "当前 CLAUDE_CONFIG_DIR",
             Self::GrokSessionJsonl => "当前 GROK_HOME",
+            Self::GlmModelIoJsonl => "GLM 本机数据根",
             Self::CombinedLocalAgents => "已开启 Agent 的独立数据根",
             Self::WorkbuddyProjectJsonl => "当前 WORKBUDDY_HOME",
         }
@@ -77,6 +83,7 @@ impl ProviderKind {
                 format!("claude-transcript-parser-v{parser_version}")
             }
             Self::GrokSessionJsonl => format!("grok-session-parser-v{parser_version}"),
+            Self::GlmModelIoJsonl => format!("glm-model-io-parser-v{parser_version}"),
             Self::CombinedLocalAgents => format!("combined-local-agents-v{parser_version}"),
             Self::WorkbuddyProjectJsonl => {
                 format!("workbuddy-project-jsonl-v{parser_version}")

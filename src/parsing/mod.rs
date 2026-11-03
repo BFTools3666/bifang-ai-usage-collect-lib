@@ -8,7 +8,7 @@ use crate::{CancellationSignal, LocalError, SourceProvenance, UsageCall};
 use serde::Serialize;
 use std::io::Read;
 
-pub use builtin::{ClaudeParser, CodexParser, GrokParser};
+pub use builtin::{ClaudeParser, CodexParser, GlmParser, GrokParser};
 pub use observed::{ReadRange, read_observed_prefix};
 
 /// 解析器的稳定技术标识和语义版本；不依赖产品的来源枚举。

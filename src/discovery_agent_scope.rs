@@ -7,7 +7,8 @@ use crate::{RootDiscoveryScope, SourceClientKind};
 const CODEX_MASK: u8 = 1 << 0;
 const CLAUDE_CODE_MASK: u8 = 1 << 1;
 const GROK_BUILD_CLI_MASK: u8 = 1 << 2;
-const ALL_PHYSICAL_AGENTS_MASK: u8 = CODEX_MASK | CLAUDE_CODE_MASK | GROK_BUILD_CLI_MASK;
+const GLM_MASK: u8 = 1 << 3;
+const ALL_PHYSICAL_AGENTS_MASK: u8 = CODEX_MASK | CLAUDE_CODE_MASK | GROK_BUILD_CLI_MASK | GLM_MASK;
 
 /// 一次数据根发现允许触达并产出候选的物理 Agent 闭集。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,7 @@ impl RootDiscoveryAgentScope {
             SourceClientKind::Codex => CODEX_MASK,
             SourceClientKind::ClaudeCode => CLAUDE_CODE_MASK,
             SourceClientKind::GrokBuildCli => GROK_BUILD_CLI_MASK,
+            SourceClientKind::Glm => GLM_MASK,
             SourceClientKind::WorkBuddy => return None,
         };
         Some(Self { mask })
@@ -48,6 +50,7 @@ impl RootDiscoveryAgentScope {
             SourceClientKind::Codex => CODEX_MASK,
             SourceClientKind::ClaudeCode => CLAUDE_CODE_MASK,
             SourceClientKind::GrokBuildCli => GROK_BUILD_CLI_MASK,
+            SourceClientKind::Glm => GLM_MASK,
             SourceClientKind::WorkBuddy => return false,
         };
         self.mask & mask != 0
@@ -88,6 +91,7 @@ pub fn resolve_root_discovery_agent_scope(
             SourceClientKind::Codex => CODEX_MASK,
             SourceClientKind::ClaudeCode => CLAUDE_CODE_MASK,
             SourceClientKind::GrokBuildCli => GROK_BUILD_CLI_MASK,
+            SourceClientKind::Glm => GLM_MASK,
             SourceClientKind::WorkBuddy => {
                 return Err(RootDiscoveryAgentScopeError::WorkbuddyNotPhysical);
             }

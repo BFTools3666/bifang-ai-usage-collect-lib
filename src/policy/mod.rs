@@ -13,6 +13,8 @@ pub enum SourceClientKind {
     ClaudeCode,
     /// Grok Build CLI 稳定标识前缀 `grok-root-`。
     GrokBuildCli,
+    /// GLM（Z Code CLI）稳定标识前缀 `glm-root-`。
+    Glm,
     /// WorkBuddy 稳定标识前缀 `workbuddy-root-`。
     WorkBuddy,
 }
@@ -24,6 +26,7 @@ impl SourceClientKind {
             Self::Codex => "root-",
             Self::ClaudeCode => "claude-root-",
             Self::GrokBuildCli => "grok-root-",
+            Self::Glm => "glm-root-",
             Self::WorkBuddy => "workbuddy-root-",
         }
     }
@@ -34,6 +37,7 @@ impl SourceClientKind {
             Self::Codex => "root",
             Self::ClaudeCode => "claude-root",
             Self::GrokBuildCli => "grok-root",
+            Self::Glm => "glm-root",
             Self::WorkBuddy => "workbuddy-root",
         }
     }
@@ -44,6 +48,7 @@ impl SourceClientKind {
             Self::Codex => "candidate-codex",
             Self::ClaudeCode => "candidate-claude",
             Self::GrokBuildCli => "candidate-grok",
+            Self::Glm => "candidate-glm",
             Self::WorkBuddy => "candidate-workbuddy",
         }
     }
@@ -54,6 +59,7 @@ impl SourceClientKind {
             Self::Codex => "Codex 数据根",
             Self::ClaudeCode => "Claude Code 数据根",
             Self::GrokBuildCli => "Grok 数据根",
+            Self::Glm => "GLM 数据根",
             Self::WorkBuddy => "WorkBuddy 数据根",
         }
     }
@@ -64,6 +70,7 @@ impl SourceClientKind {
             Self::Codex => "当前 CODEX_HOME",
             Self::ClaudeCode => "当前 CLAUDE_CONFIG_DIR",
             Self::GrokBuildCli => "当前 GROK_HOME",
+            Self::Glm => "GLM 本机数据根",
             Self::WorkBuddy => "当前 WORKBUDDY_HOME",
         }
     }
@@ -78,6 +85,7 @@ impl SourceClientKind {
             Self::Codex => 10,
             Self::ClaudeCode => 6,
             Self::GrokBuildCli => 6,
+            Self::Glm => 1,
             Self::WorkBuddy => 1,
         }
     }

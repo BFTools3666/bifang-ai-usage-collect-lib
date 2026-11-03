@@ -1,6 +1,6 @@
 # AI 用量扫描与统计
 
-独立 Rust 依赖包，提供 Codex、Claude Code、Grok 和 WorkBuddy 本机用量的只读获取，以及 Token 校验、规范化、去重和通用统计。最低 Rust 为 1.95，edition 为 2024。
+独立 Rust 依赖包，提供 Codex、Claude Code、Grok、GLM 和 WorkBuddy 本机用量的只读获取，以及 Token 校验、规范化、去重和通用统计。最低 Rust 为 1.95，edition 为 2024。
 
 本目录被产品根 workspace 显式排除，清单、版本和锁文件独立维护。其他 Rust 应用直接引用本包即可，无需依赖毕方面板、Tauri、SQLite 或异步运行时：
 
@@ -28,7 +28,7 @@ ai_usage_collect_scan = { version = "0.3.1", path = "../ai_usage_collect_scan" }
 ai_usage_collect_scan = { version = "0.3.1", path = "../ai_usage_collect_scan", features = ["storage"] }
 ```
 
-`storage::LocalIndex::open(base_dir, relative_path, client)` 要求绝对基准目录、非空相对路径和 `SourceClientKind`。例如同一基准目录分别使用 `codex.db`、`claude.db`、`grok.db`。嵌套相对目录可自动创建；拒绝绝对路径、父目录跳转、链接、WorkBuddy、错 Agent 与未知业务数据库。库不决定产品目录，也不从当前进程读取 GUI 设置；调用者提供 Tokio 运行时。
+`storage::LocalIndex::open(base_dir, relative_path, client)` 要求绝对基准目录、非空相对路径和 `SourceClientKind`。例如同一基准目录分别使用 `codex.db`、`claude.db`、`grok.db`、`glm.db`。嵌套相对目录可自动创建；拒绝绝对路径、父目录跳转、链接、WorkBuddy、错 Agent 与未知业务数据库。库不决定产品目录，也不从当前进程读取 GUI 设置；调用者提供 Tokio 运行时。
 
 ```rust,no_run
 # #[cfg(feature = "storage")]
@@ -51,7 +51,7 @@ let aggregate = aggregate_canonical_usage(&canonical)?;
 
 单文件导入不证明整个根枚举完整，因此根覆盖保守记为 Partial。此便捷入口不输出来源专属增量上下文；后续 GUI 因缺少警告/上下文快照安全完整重建。需要增量索引时，使用同一 `LocalIndex` 的来源登记、checkpoint、批次写入和扫描事务原语；`begin_scan_attempt` 到发布/回滚之间，其他连接只见上次已提交结果。
 
-统计存储只初始化空库或打开带当前格式标记的库，不接管旧 schema 或未知业务库。GUI 在产品数据目录下分别传入 `codex.db`、`claude.db`、`grok.db`；旧统计库不探测、不读取、不导入、不删除，由用户重新扫描建立数据。每个 Agent 库共同保存发现候选、确认根及扫描位置、扫描状态、来源 checkpoint、调用和累计快照。候选可跨连接和进程恢复，确认登记与移除候选在同一事务内完成；宿主必须先持久化本轮候选再发布发现终态，取消时保留已发现位置并保守报告覆盖。
+统计存储只初始化空库或打开带当前格式标记的库，不接管旧 schema 或未知业务库。GUI 在产品数据目录下分别传入 `codex.db`、`claude.db`、`grok.db`、`glm.db`；旧统计库不探测、不读取、不导入、不删除，由用户重新扫描建立数据。每个 Agent 库共同保存发现候选、确认根及扫描位置、扫描状态、来源 checkpoint、调用和累计快照。候选可跨连接和进程恢复，确认登记与移除候选在同一事务内完成；宿主必须先持久化本轮候选再发布发现终态，取消时保留已发现位置并保守报告覆盖。
 
 GUI 的 `gui-settings.sqlite3`、账号会话库和身份锚不属于本包；误传 GUI 业务数据库会被拒绝。保留策略、跨库联合视图和业务调度仍由客户端决定。
 
@@ -100,7 +100,7 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 
 仅抽取两个有实际替换需求的 Trait：
 
-- `parsing::UsageParser`：关联 `Context` 和 `Report`，输入为标准 `Read`，输出标准 `UsageCall`。内置 `CodexParser`、`ClaudeParser`、`GrokParser` 与产品索引器共用此协议。外部应用可以实现新格式，无需修改 `SourceClientKind` 或产品来源闭集。
+- `parsing::UsageParser`：关联 `Context` 和 `Report`，输入为标准 `Read`，输出标准 `UsageCall`。内置 `CodexParser`、`ClaudeParser`、`GrokParser`、`GlmParser` 与产品索引器共用此协议。外部应用可以实现新格式，无需修改 `SourceClientKind` 或产品来源闭集。
 - `CancellationSignal`：宿主可实现自己的取消信号，也可直接传入借用宿主状态的 `Fn() -> bool + Send + Sync`；`ScanCancellation` 是库提供的便利实现。JSONL 读取和 WorkBuddy 读取共用该接口；发现协调器保留已有的生命周期与取消接口。
 
 不额外定义文件系统、记录仓库或统计 Trait：标准 `Read` / `Seek` 和 `FnMut(UsageCall)` 已能替换输入与消费方式，纯统计函数可以直接组合。
@@ -109,7 +109,7 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 
 需要增量读取时，先通过 `input::open_*_source` 得到 `OpenedUsageFile`，读取同一次打开的大小、修改时间和指纹，再用 `parsing::read_observed_prefix`、`ReadRange` 和 `ParseRequest` 读取指定前缀。范围外的追加留给下一轮；上下文按值移交，错误时不返回已推进的上下文。成功或取消报告的完整行偏移、未完成尾部、超长行状态，以及来源特有上下文应作为一组由客户端保存。指纹是既有首 64 字节内容摘要，不是操作系统物理文件身份。
 
-底层 `readers::{jsonl,claude::jsonl,grok::jsonl}` 接口仍可直接使用。该层按引用修改上下文，失败后调用方应恢复最后一次已提交状态。异步宿主负责在自己拥有并回收的 blocking worker 中调用同步文件读取。
+底层 `readers::{jsonl,claude::jsonl,grok::jsonl,glm::jsonl}` 接口仍可直接使用。该层按引用修改上下文，失败后调用方应恢复最后一次已提交状态。异步宿主负责在自己拥有并回收的 blocking worker 中调用同步文件读取。
 
 ## 发现与 WorkBuddy
 
@@ -118,9 +118,10 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 | Codex 快速/全盘发现 | `readers::discovery` |
 | Claude Code、Claude Desktop 本地 Agent 发现 | `readers::claude::discovery` |
 | Grok 发现 | `readers::grok::discovery` |
+| GLM 发现 | `readers::glm::discovery` |
 | 元数据候选、范围和进度 | `readers::metadata_discovery` |
 | 本地卷、网络卷排除和用户目录 | `readers::volume_roots`、`readers::user_paths` |
-| 根内枚举 | `readers::directory`、`readers::{claude,grok}::enumerate` |
+| 根内枚举 | `readers::directory`、`readers::{claude,grok,glm}::enumerate` |
 | WorkBuddy 国内/国际版固定布局读取 | `readers::workbuddy` |
 | WorkBuddy 通用校验、去重和安全记录 | `workbuddy_facts` |
 | 规范化与通用统计 | `canonicalize_usage_calls`、`aggregate_canonical_usage`、`group_usage`、`summarize_usage` |
@@ -149,4 +150,6 @@ cargo test --manifest-path ai_usage_collect_scan/Cargo.toml --all-features --loc
 
 Linux 临时目录位于 tmpfs 时，将 `TMPDIR` 指向本机持久磁盘目录，让合成来源通过本地卷策略。
 
-[消费者测试](tests/consumer.rs) 覆盖发现、枚举、读取、统计、WorkBuddy 双版本及子代理，并验证不修改来源或创建存储。[扩展测试](tests/parser_extension.rs) 用外部动态解析器与借用宿主状态的取消信号复用标准统计。[文件入口测试](tests/readonly_files.rs) 覆盖三种内置来源、快照、序列化、增量前缀、同一文件句柄、路径跳转和链接拒绝。
+[消费者测试](tests/consumer.rs) 覆盖发现、枚举、读取、统计、WorkBuddy 双版本及子代理，并验证不修改来源或创建存储。[扩展测试](tests/parser_extension.rs) 用外部动态解析器与借用宿主状态的取消信号复用标准统计。[文件入口测试](tests/readonly_files.rs) 覆盖四种内置来源、快照、序列化、增量前缀、同一文件句柄、路径跳转和链接拒绝。
+
+GLM（Z Code CLI）使用 `JsonlFormat::Glm`，只接受获授权 rollout 根内平铺的 `model-io-sess_*.jsonl` 普通文件。默认候选为 `~/.zcode/cli/rollout`，subagent 文件同样计入；仅提取 `model_io` 的模型、时间、会话身份与 `response.usage` 五项，不输出 request/response 正文或 headers。GLM 无项目、推理强度及独立推理输出分项，缺失值保持未提供。

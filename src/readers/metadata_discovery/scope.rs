@@ -136,6 +136,7 @@ pub(super) fn is_unselected_agent_directory(path: &Path, agents: RootDiscoveryAg
             ".codex" | "aimanagerdata" => SourceClientKind::Codex,
             ".claude" => SourceClientKind::ClaudeCode,
             ".grok" => SourceClientKind::GrokBuildCli,
+            ".zcode" => SourceClientKind::Glm,
             _ => return false,
         }
     };
@@ -161,6 +162,10 @@ pub(super) fn candidate_from_file_name(
     path: &Path,
     agents: RootDiscoveryAgentScope,
 ) -> Option<(PathBuf, RootCandidateEvidence)> {
+    let parent = path.parent()?;
+    if !crate::readers::glm::path_rules::is_allowed_glm_discovery_directory(parent) {
+        return None;
+    }
     let name = path.file_name()?.to_str()?;
     if agents.contains(SourceClientKind::Codex)
         && name.starts_with("rollout-")
@@ -205,6 +210,17 @@ pub(super) fn candidate_from_file_name(
             return allowed_root(&root)
                 .then_some((root, RootCandidateEvidence::GrokSessionUpdates));
         }
+    }
+    if agents.contains(SourceClientKind::Glm)
+        && stem.starts_with("model-io-sess_")
+        && !stem["model-io-sess_".len()..].is_empty()
+        && parent.file_name()?.to_str()? == "rollout"
+        && parent.parent()?.file_name()?.to_str()? == "cli"
+    {
+        let root = parent.to_path_buf();
+        return (allowed_root(&root)
+            && crate::readers::glm::path_rules::is_allowed_glm_root(&root))
+        .then_some((root, RootCandidateEvidence::GlmModelIoUpdates));
     }
     None
 }
@@ -359,6 +375,32 @@ mod tests {
                     "系统索引返回的 {name} 会话文件必须被拒绝"
                 );
             }
+        }
+    }
+    /// 未开启 GLM 不产出其候选；开启后仍拒绝私有子树中的各种伪装布局。
+    #[test]
+    fn glm_metadata_candidates_respect_selection_and_private_subtrees() {
+        let home = PathBuf::from("/synthetic-home");
+        let approved = home.join(".zcode/cli/rollout/model-io-sess_valid.jsonl");
+        let glm =
+            RootDiscoveryAgentScope::for_agent(SourceClientKind::Glm).expect("GLM is physical");
+        let codex =
+            RootDiscoveryAgentScope::for_agent(SourceClientKind::Codex).expect("Codex is physical");
+        assert!(candidate_from_file_name(&approved, glm).is_some());
+        assert!(candidate_from_file_name(&approved, codex).is_none());
+        assert!(is_unselected_agent_directory(&home.join(".zcode"), codex));
+        for relative in [
+            ".zcode/logs/model-io-sess_decoy.jsonl",
+            ".zcode/workspace/project/cli/rollout/model-io-sess_decoy.jsonl",
+            ".zcode/workspace/projects/project/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0.jsonl",
+        ] {
+            assert!(
+                candidate_from_file_name(
+                    &home.join(relative),
+                    RootDiscoveryAgentScope::all_physical()
+                )
+                .is_none()
+            );
         }
     }
 }
