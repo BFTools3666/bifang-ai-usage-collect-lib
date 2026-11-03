@@ -1,6 +1,6 @@
 # AI 用量扫描与统计
 
-独立 Rust 依赖包，提供 Codex、Claude Code、Grok、GLM 和 WorkBuddy 本机用量的只读获取，以及 Token 校验、规范化、去重和通用统计。最低 Rust 为 1.95，edition 为 2024。
+独立 Rust 依赖包，提供 Codex、Claude Code、Grok、ZCode 和 WorkBuddy 本机用量的只读获取，以及 Token 校验、规范化、去重和通用统计。最低 Rust 为 1.95，edition 为 2024。
 
 本目录被产品根 workspace 显式排除，清单、版本和锁文件独立维护。其他 Rust 应用直接引用本包即可，无需依赖毕方面板、Tauri、SQLite 或异步运行时：
 
@@ -118,7 +118,7 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 | Codex 快速/全盘发现 | `readers::discovery` |
 | Claude Code、Claude Desktop 本地 Agent 发现 | `readers::claude::discovery` |
 | Grok 发现 | `readers::grok::discovery` |
-| GLM 发现 | `readers::glm::discovery` |
+| ZCode 发现 | `readers::glm::discovery` |
 | 元数据候选、范围和进度 | `readers::metadata_discovery` |
 | 本地卷、网络卷排除和用户目录 | `readers::volume_roots`、`readers::user_paths` |
 | 根内枚举 | `readers::directory`、`readers::{claude,grok,glm}::enumerate` |
@@ -152,4 +152,8 @@ Linux 临时目录位于 tmpfs 时，将 `TMPDIR` 指向本机持久磁盘目录
 
 [消费者测试](tests/consumer.rs) 覆盖发现、枚举、读取、统计、WorkBuddy 双版本及子代理，并验证不修改来源或创建存储。[扩展测试](tests/parser_extension.rs) 用外部动态解析器与借用宿主状态的取消信号复用标准统计。[文件入口测试](tests/readonly_files.rs) 覆盖四种内置来源、快照、序列化、增量前缀、同一文件句柄、路径跳转和链接拒绝。
 
-GLM（Z Code CLI）使用 `JsonlFormat::Glm`，只接受获授权 rollout 根内平铺的 `model-io-sess_*.jsonl` 普通文件。默认候选为 `~/.zcode/cli/rollout`，subagent 文件同样计入；仅提取 `model_io` 的模型、时间、会话身份与 `response.usage` 五项，不输出 request/response 正文或 headers。GLM 无项目、推理强度及独立推理输出分项，缺失值保持未提供。
+ZCode（Z Code CLI）使用 `JsonlFormat::Glm`，只接受获授权 rollout 根内平铺的 `model-io-sess_*.jsonl` 普通文件。默认候选为 `~/.zcode/cli/rollout`，subagent 文件同样计入；仅提取 `model_io` 的模型、时间、会话身份与 `response.usage` 五项，不输出 request/response 正文或 headers。ZCode 无项目、推理强度及独立推理输出分项，缺失值保持未提供。
+
+### ZCode 桌面用量库
+
+启用既有 `storage` feature 后，`readers::glm::database::ZcodeUsageDatabase` 分页只读固定 `~/.zcode/cli/db/db.sqlite` 的 `model_usage` 白名单列；`LocalIndex::index_zcode_database` 在宿主已有扫描事务内写入本产品派生库。每轮读一致快照及 WAL，以 `computed_total_tokens` 为总量，保留真实模型名，包含付费与免费模型。默认发现同安装优先数据库，只有库缺失时选择 rollout，坏库不回退。CLI 的 `JsonlFormat::Glm` 接口保持 JSONL，不把 SQLite 字节交给 JSONL parser；稳定 `glm`/provider 编码保持兼容。

@@ -49,6 +49,7 @@ where
     let mut budget_exhausted = false;
 
     while let Some((path, traversal_root)) = stack.pop() {
+        let path = super::super::path_rules::preferred_glm_root(&path);
         if !is_allowed_glm_discovery_directory(&path) {
             continue;
         }

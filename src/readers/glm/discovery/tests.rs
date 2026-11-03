@@ -247,3 +247,99 @@ fn explicitly_authorized_external_rollout_still_opens() {
     .expect("explicit external root with the approved flat layout opens");
     assert!(opened.metadata().observed_size > 0);
 }
+
+/// 同一安装存在桌面库时只选数据库，旧日志观察被替代且用户别名保留。
+#[test]
+fn desktop_database_is_the_single_authority_for_a_registered_installation() {
+    let temp = tempfile::tempdir().expect("isolated home");
+    let home = fs::canonicalize(temp.path()).expect("canonical home");
+    let rollout = default_rollout_dir(&home);
+    fs::create_dir_all(&rollout).expect("rollout");
+    write_model_io_file(&rollout, "model-io-sess_main.jsonl");
+    let database = home.join(".zcode/cli/db");
+    fs::create_dir_all(&database).expect("database root");
+    fs::write(database.join("db.sqlite"), b"SQLite format 3\0").expect("SQLite header");
+    let input = GlmDiscoveryInputs {
+        home_dir: Some(home),
+        registered_roots: vec![crate::RegisteredRoot {
+            root_id: Some("glm-root-existing".to_owned()),
+            path: rollout,
+            alias: "My ZCode".to_owned(),
+            enabled: true,
+        }],
+    };
+    let result = discover_glm_quick(&input, &CancellationToken::default());
+    assert_eq!(result.roots.len(), 1);
+    assert_eq!(result.roots[0].path, database);
+    assert_ne!(result.roots[0].root_id, "glm-root-existing");
+    assert_eq!(result.confirmed_invalid_root_ids, ["glm-root-existing"]);
+    assert_eq!(result.roots[0].alias, "My ZCode");
+    fs::write(database.join("db.sqlite"), b"invalid database").expect("broken source");
+    let broken = discover_glm_quick(&input, &CancellationToken::default());
+    assert!(
+        broken.roots.is_empty(),
+        "bad database must not fall back to overlapping CLI logs"
+    );
+    assert!(
+        broken.confirmed_invalid_root_ids.is_empty(),
+        "keep the previous published root"
+    );
+    assert_eq!(broken.unconfirmed_root_ids, ["glm-root-existing"]);
+    assert_eq!(broken.coverage.state, crate::CoverageState::Partial);
+}
+
+/// 已登记日志与桌面根无论顺序如何都只保留桌面身份，恢复旧身份不会重新激活日志。
+#[test]
+fn registered_database_identity_and_retired_rollout_do_not_depend_on_order() {
+    let temp = tempfile::tempdir().expect("isolated home");
+    let home = fs::canonicalize(temp.path()).expect("canonical home");
+    let rollout = default_rollout_dir(&home);
+    let database = home.join(".zcode/cli/db");
+    fs::create_dir_all(&rollout).expect("rollout");
+    fs::create_dir_all(&database).expect("database root");
+    write_model_io_file(&rollout, "model-io-sess_main.jsonl");
+    fs::write(database.join("db.sqlite"), b"SQLite format 3\0").expect("SQLite header");
+    let old = crate::RegisteredRoot {
+        root_id: Some("glm-root-old".to_owned()),
+        path: rollout,
+        alias: "old".to_owned(),
+        enabled: true,
+    };
+    let current = crate::RegisteredRoot {
+        root_id: Some("glm-root-desktop".to_owned()),
+        path: database.clone(),
+        alias: "desktop".to_owned(),
+        enabled: true,
+    };
+    for registered in [
+        vec![old.clone(), current.clone()],
+        vec![current.clone(), old.clone()],
+    ] {
+        let result = discover_glm_quick(
+            &GlmDiscoveryInputs {
+                home_dir: Some(home.clone()),
+                registered_roots: registered,
+            },
+            &CancellationToken::default(),
+        );
+        assert_eq!(result.roots.len(), 1);
+        assert_eq!(result.roots[0].root_id, "glm-root-desktop");
+        assert_eq!(result.confirmed_invalid_root_ids, ["glm-root-old"]);
+    }
+    fs::remove_file(database.join("db.sqlite"))
+        .expect("simulate missing registered desktop source");
+    let missing = discover_glm_quick(
+        &GlmDiscoveryInputs {
+            home_dir: Some(home),
+            registered_roots: vec![current],
+        },
+        &CancellationToken::default(),
+    );
+    assert!(
+        missing.roots.is_empty(),
+        "registered unavailable database cannot reactivate overlapping logs"
+    );
+    assert!(missing.confirmed_invalid_root_ids.is_empty());
+    assert_eq!(missing.unconfirmed_root_ids, ["glm-root-desktop"]);
+    assert_eq!(missing.coverage.state, crate::CoverageState::Partial);
+}

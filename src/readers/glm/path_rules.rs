@@ -66,7 +66,32 @@ fn zcode_relative_path(path: &Path) -> Option<&Path> {
 
 /// `.zcode` 内只批准固定 `cli/rollout` 根；外部显式授权的同布局根仍可用。
 pub fn is_allowed_glm_root(path: &Path) -> bool {
-    zcode_relative_path(path).is_none_or(|relative| relative == Path::new("cli").join("rollout"))
+    zcode_relative_path(path).is_none_or(|relative| {
+        relative == Path::new("cli").join("rollout") || relative == Path::new("cli").join("db")
+    })
+}
+
+/// 桌面用量库存在时同一安装只选数据库；坏库、链接或权限失败不能回退叠加日志。
+pub fn preferred_glm_root(path: &Path) -> std::path::PathBuf {
+    if let Some(database) = database_for_glm_rollout(path) {
+        if !matches!(std::fs::symlink_metadata(database.join("db.sqlite")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return database;
+        }
+    }
+    path.to_path_buf()
+}
+
+/// 仅为固定 CLI 日志根推导同安装的桌面数据库目录，不访问文件系统。
+pub fn database_for_glm_rollout(path: &Path) -> Option<std::path::PathBuf> {
+    (zcode_relative_path(path) == Some(Path::new("cli").join("rollout").as_path()))
+        .then(|| path.parent().expect("rollout has cli parent").join("db"))
+}
+
+/// 数据库来源只接受名为 db 的已授权根内固定 db.sqlite，绝不遍历其他 SQLite。
+pub fn is_glm_database_root(path: &Path) -> bool {
+    zcode_relative_path(path) == Some(Path::new("cli").join("db").as_path())
 }
 
 /// 发现可以经过 `.zcode` 与 `cli`，但不能进入其余私有子树或 rollout 子目录。
@@ -75,6 +100,7 @@ pub fn is_allowed_glm_discovery_directory(path: &Path) -> bool {
         relative.as_os_str().is_empty()
             || relative == Path::new("cli")
             || relative == Path::new("cli").join("rollout")
+            || relative == Path::new("cli").join("db")
     })
 }
 

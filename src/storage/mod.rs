@@ -9,6 +9,8 @@ pub use file_import::PreparedFileIndex;
 mod binding;
 mod call_store;
 mod checkpoint;
+mod zcode;
+pub use zcode::ZcodeDatabaseIndexOutcome;
 mod error;
 mod path_codec;
 mod private_sqlite;

@@ -396,13 +396,13 @@ fn parse_started_at(value: Option<&str>) -> Option<i64> {
 }
 
 /// 只接受有界且不含控制字符的请求或会话身份；原文只用于派生散列键。
-fn safe_identity(value: &str) -> Option<&str> {
+pub(super) fn safe_identity(value: &str) -> Option<&str> {
     (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
         .then_some(value)
 }
 
 /// 清理 GLM 模型标签并拒绝路径或控制字符。
-fn safe_model_label(value: &str) -> Option<&str> {
+pub(super) fn safe_model_label(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty()
         && trimmed.len() <= 128

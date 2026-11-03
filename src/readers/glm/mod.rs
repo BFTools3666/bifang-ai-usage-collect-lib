@@ -1,5 +1,7 @@
-//! GLM（Z Code CLI）的只读发现、文件结构校验与流式解析。
+//! ZCode 桌面与 CLI 的只读发现、用量白名单与独立索引。
 
+#[cfg(feature = "storage")]
+pub mod database;
 pub mod discovery;
 pub mod jsonl;
 pub mod path_rules;

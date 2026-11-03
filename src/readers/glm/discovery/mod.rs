@@ -86,6 +86,8 @@ pub struct GlmDiscoveryResult {
 struct Candidate {
     /// 已登记数据根的 ID；尚未登记为 `None`。
     existing_root_id: Option<String>,
+    /// 被同安装数据库替代的旧日志根；仅在新来源确认后删除派生观察。
+    replaced_root_id: Option<String>,
     /// 候选根的真实路径，不进入对外结果。
     path: PathBuf,
     /// 候选展示别名。
@@ -111,18 +113,43 @@ fn quick_candidates(inputs: &GlmDiscoveryInputs) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     for root in &inputs.registered_roots {
         if root.enabled {
+            let preferred = super::path_rules::preferred_glm_root(&root.path);
+            let replacing = preferred != root.path;
             candidates.push(Candidate {
-                existing_root_id: root.root_id.clone(),
-                path: root.path.clone(),
+                existing_root_id: if replacing {
+                    None
+                } else {
+                    root.root_id.clone()
+                },
+                replaced_root_id: if replacing {
+                    root.root_id.clone()
+                } else {
+                    None
+                },
+                path: preferred,
                 alias: root.alias.clone(),
                 method: DiscoveryMethod::Registered,
             });
         }
     }
     if let Some(home_dir) = &inputs.home_dir {
-        let path = default_rollout_dir(home_dir);
+        let rollout = default_rollout_dir(home_dir);
+        let database = rollout
+            .parent()
+            .expect("fixed rollout has parent")
+            .join("db");
+        let path = if inputs
+            .registered_roots
+            .iter()
+            .any(|root| root.enabled && root.path == database)
+        {
+            database
+        } else {
+            super::path_rules::preferred_glm_root(&rollout)
+        };
         candidates.push(Candidate {
             existing_root_id: None,
+            replaced_root_id: None,
             alias: safe_alias(&path),
             path,
             method: DiscoveryMethod::DefaultHome,
@@ -150,6 +177,7 @@ fn inspect_candidates(
     let mut budget = SignatureBudget::new(options, cancellation);
 
     for candidate in candidates {
+        let database_authority = super::path_rules::is_glm_database_root(&candidate.path);
         if cancellation.is_cancelled() {
             cancelled = true;
             break;
@@ -157,8 +185,12 @@ fn inspect_candidates(
         if is_obviously_network_path(&candidate.path) {
             network_skipped_count = network_skipped_count.saturating_add(1);
             skipped_count = skipped_count.saturating_add(1);
-            if let Some(id) = candidate.existing_root_id {
-                confirmed_invalid_ids.insert(id);
+            if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
+                if database_authority {
+                    unconfirmed_ids.insert(id);
+                } else {
+                    confirmed_invalid_ids.insert(id);
+                }
             }
             continue;
         }
@@ -166,22 +198,26 @@ fn inspect_candidates(
             Ok(true) => {
                 symlink_skipped_count = symlink_skipped_count.saturating_add(1);
                 skipped_count = skipped_count.saturating_add(1);
-                if let Some(id) = candidate.existing_root_id {
-                    confirmed_invalid_ids.insert(id);
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
+                    if database_authority {
+                        unconfirmed_ids.insert(id);
+                    } else {
+                        confirmed_invalid_ids.insert(id);
+                    }
                 }
                 continue;
             }
             Ok(false) => {}
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 permission_denied_count = permission_denied_count.saturating_add(1);
-                if let Some(id) = candidate.existing_root_id {
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
                     unconfirmed_ids.insert(id);
                 }
                 continue;
             }
             Err(_) => {
                 skipped_count = skipped_count.saturating_add(1);
-                if let Some(id) = candidate.existing_root_id {
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
                     unconfirmed_ids.insert(id);
                 }
                 continue;
@@ -192,26 +228,35 @@ fn inspect_candidates(
             LocalPathStatus::RejectedNetwork => {
                 network_skipped_count = network_skipped_count.saturating_add(1);
                 skipped_count = skipped_count.saturating_add(1);
-                if let Some(id) = candidate.existing_root_id {
-                    confirmed_invalid_ids.insert(id);
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
+                    if database_authority {
+                        unconfirmed_ids.insert(id);
+                    } else {
+                        confirmed_invalid_ids.insert(id);
+                    }
                 }
                 continue;
             }
             LocalPathStatus::Missing => {
-                if candidate
-                    .method
-                    .counts_as_coverage_gap(candidate.existing_root_id.is_some())
+                if database_authority
+                    || candidate
+                        .method
+                        .counts_as_coverage_gap(candidate.existing_root_id.is_some())
                 {
                     skipped_count = skipped_count.saturating_add(1);
                 }
-                if let Some(id) = candidate.existing_root_id {
-                    confirmed_invalid_ids.insert(id);
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
+                    if database_authority {
+                        unconfirmed_ids.insert(id);
+                    } else {
+                        confirmed_invalid_ids.insert(id);
+                    }
                 }
                 continue;
             }
             LocalPathStatus::Indeterminate => {
                 skipped_count = skipped_count.saturating_add(1);
-                if let Some(id) = candidate.existing_root_id {
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
                     unconfirmed_ids.insert(id);
                 }
                 continue;
@@ -220,42 +265,49 @@ fn inspect_candidates(
         let normalized = match fs::canonicalize(&candidate.path) {
             Ok(path) => path,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if let Some(id) = candidate.existing_root_id {
-                    confirmed_invalid_ids.insert(id);
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
+                    if database_authority {
+                        unconfirmed_ids.insert(id);
+                    } else {
+                        confirmed_invalid_ids.insert(id);
+                    }
                 }
                 continue;
             }
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 permission_denied_count = permission_denied_count.saturating_add(1);
-                if let Some(id) = candidate.existing_root_id {
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
                     unconfirmed_ids.insert(id);
                 }
                 continue;
             }
             Err(_) => {
                 skipped_count = skipped_count.saturating_add(1);
-                if let Some(id) = candidate.existing_root_id {
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
                     unconfirmed_ids.insert(id);
                 }
                 continue;
             }
         };
         if !inspected_paths.insert(normalized.clone()) {
-            if let Some(root) = roots.get_mut(&normalized)
-                && candidate.method.priority() > root.discovery_method.priority()
-            {
-                root.alias = candidate.alias;
-                root.discovery_method = candidate.method;
-                if candidate.method == DiscoveryMethod::Registered
-                    && let Some(id) = candidate.existing_root_id
-                {
+            if let Some(root) = roots.get_mut(&normalized) {
+                if let Some(id) = candidate.replaced_root_id {
+                    confirmed_invalid_ids.insert(id);
+                }
+                if let Some(id) = candidate.existing_root_id {
+                    // 已登记数据库身份优先于从旧日志候选派生的新身份；与 core 的路径恢复一致。
                     root.root_id = id;
+                    root.alias = candidate.alias;
+                    root.discovery_method = candidate.method;
                 }
             }
             continue;
         }
         match inspect_root(&normalized, &mut budget) {
             Inspection::Found(evidence) => {
+                if let Some(id) = candidate.replaced_root_id {
+                    confirmed_invalid_ids.insert(id);
+                }
                 let root_id = candidate
                     .existing_root_id
                     .unwrap_or_else(|| stable_id("glm-root", &path_key(&normalized)));
@@ -271,25 +323,33 @@ fn inspect_candidates(
                 );
             }
             Inspection::NotRoot | Inspection::Rejected => {
-                if let Some(id) = candidate.existing_root_id {
-                    confirmed_invalid_ids.insert(id);
+                if database_authority {
+                    skipped_count = skipped_count.saturating_add(1);
+                }
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
+                    if database_authority {
+                        unconfirmed_ids.insert(id);
+                    } else {
+                        confirmed_invalid_ids.insert(id);
+                    }
                 }
             }
             Inspection::Indeterminate => {
-                if let Some(id) = candidate.existing_root_id {
+                skipped_count = skipped_count.saturating_add(1);
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
                     unconfirmed_ids.insert(id);
                 }
             }
             Inspection::Cancelled => {
                 cancelled = true;
-                if let Some(id) = candidate.existing_root_id {
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
                     unconfirmed_ids.insert(id);
                 }
                 break;
             }
             Inspection::BudgetExhausted => {
                 budget_exhausted = true;
-                if let Some(id) = candidate.existing_root_id {
+                if let Some(id) = candidate.existing_root_id.or(candidate.replaced_root_id) {
                     unconfirmed_ids.insert(id);
                 }
                 break;

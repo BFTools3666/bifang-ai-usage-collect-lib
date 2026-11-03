@@ -1,4 +1,4 @@
-//! GLM（Z Code CLI）rollout 根结构签名探测：只承认平铺 `model-io-sess_*.jsonl`。
+//! ZCode（Z Code CLI）rollout 根结构签名探测：只承认平铺 `model-io-sess_*.jsonl`。
 
 use std::fs::{self, File};
 use std::io::Read;
@@ -48,11 +48,11 @@ impl<'a> SignatureBudget<'a> {
 /// 单次结构签名探测的结论。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Inspection {
-    /// 确认是 GLM rollout 根，并保留命中的结构证据。
+    /// 确认是 ZCode rollout 根，并保留命中的结构证据。
     Found(RootCandidateEvidence),
     /// 目录不存在。
     NotRoot,
-    /// 确认结构不符合 GLM rollout 特征。
+    /// 确认结构不符合 ZCode rollout 特征。
     Rejected,
     /// 未能得出确定结论，须保留旧登记。
     Indeterminate,
@@ -62,7 +62,7 @@ pub enum Inspection {
     BudgetExhausted,
 }
 
-/// 仅反序列化 GLM 签名所需的白名单字段。
+/// 仅反序列化 ZCode 签名所需的白名单字段。
 #[derive(Deserialize)]
 struct SignatureEnvelope {
     /// 事件类型标记，只用于识别模型 I/O 事件。
@@ -101,7 +101,7 @@ struct SignatureUsage {
     cache_write_tokens: Option<u64>,
 }
 
-/// 探测候选路径是否为含可信用量文件的 GLM rollout 根。
+/// 探测候选路径是否为含可信用量文件的 ZCode rollout 根。
 pub fn inspect_root(path: &Path, budget: &mut SignatureBudget<'_>) -> Inspection {
     if !is_allowed_glm_root(path) {
         return Inspection::Rejected;
@@ -118,6 +118,10 @@ pub fn inspect_root(path: &Path, budget: &mut SignatureBudget<'_>) -> Inspection
         return Inspection::BudgetExhausted;
     }
     budget.remaining_directories -= 1;
+    if super::super::path_rules::is_glm_database_root(path) {
+        return inspect_database_file(&path.join("db.sqlite"), budget);
+    }
+
     let entries = match fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Inspection::NotRoot,
@@ -168,6 +172,34 @@ pub fn inspect_root(path: &Path, budget: &mut SignatureBudget<'_>) -> Inspection
         Inspection::Indeterminate
     } else {
         Inspection::Rejected
+    }
+}
+
+/// 固定桌面库只探测 SQLite 文件头；实际专用表结构在只读事务内校验。
+fn inspect_database_file(path: &Path, budget: &mut SignatureBudget<'_>) -> Inspection {
+    if budget.remaining_files == 0 || budget.remaining_bytes < 16 {
+        return Inspection::BudgetExhausted;
+    }
+    budget.remaining_files -= 1;
+    budget.remaining_bytes -= 16;
+    if !matches!(reject_link_components(path), Ok(false)) {
+        return Inspection::Rejected;
+    }
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Inspection::NotRoot,
+        Err(_) => return Inspection::Indeterminate,
+    };
+    let mut header = [0; 16];
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return Inspection::Rejected;
+    }
+    match file.read_exact(&mut header) {
+        Ok(()) if &header == b"SQLite format 3\0" => {
+            Inspection::Found(RootCandidateEvidence::GlmModelIoUpdates)
+        }
+        Ok(()) => Inspection::Indeterminate,
+        Err(_) => Inspection::Indeterminate,
     }
 }
 
@@ -280,10 +312,13 @@ pub fn reject_link_components(path: &Path) -> std::io::Result<bool> {
 
 /// 取路径末段作为安全展示别名；rollout 目录展示为 `rollout`。
 pub fn safe_alias(path: &Path) -> String {
+    if super::super::path_rules::is_glm_database_root(path) {
+        return "ZCode".to_owned();
+    }
     path.file_name()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
-        .unwrap_or("GLM 数据根")
+        .unwrap_or("ZCode 数据根")
         .to_owned()
 }
 
@@ -315,7 +350,7 @@ pub fn crosses_search_root(path: &Path, traversal_root: &Path, search_roots: &[P
     })
 }
 
-/// 默认 GLM rollout 根在用户主目录下的固定相对路径段。
+/// 默认 ZCode rollout 根在用户主目录下的固定相对路径段。
 pub const GLM_ROLLOUT_HOME_RELATIVE: &str = ".zcode/cli/rollout";
 
 /// 拼接用户主目录与固定 rollout 相对路径。

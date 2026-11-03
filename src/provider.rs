@@ -30,7 +30,7 @@ pub enum ProviderKind {
     ClaudeTranscriptJsonl,
     /// 从用户授权 Grok home 中的 `sessions/**/updates.jsonl` 观察到的事实。
     GrokSessionJsonl,
-    /// 从用户授权 GLM（Z Code CLI）rollout 根中的 `model-io-sess_*.jsonl` 观察到的事实。
+    /// ZCode 专用用量表或 CLI 日志的事实；保留历史 provider 协议编码。
     GlmModelIoJsonl,
     /// 从多个已开启本机 Agent 的独立 provider 联合得到的只读事实。
     CombinedLocalAgents,
@@ -69,7 +69,7 @@ impl ProviderKind {
             Self::RolloutJsonl => "当前 CODEX_HOME",
             Self::ClaudeTranscriptJsonl => "当前 CLAUDE_CONFIG_DIR",
             Self::GrokSessionJsonl => "当前 GROK_HOME",
-            Self::GlmModelIoJsonl => "GLM 本机数据根",
+            Self::GlmModelIoJsonl => "ZCode 本机数据根",
             Self::CombinedLocalAgents => "已开启 Agent 的独立数据根",
             Self::WorkbuddyProjectJsonl => "当前 WORKBUDDY_HOME",
         }
