@@ -115,9 +115,9 @@ mod tests {
     fn claude_encoded_directory_uses_final_segment() {
         assert_eq!(
             claude_project_display_label(
-                "-Users-manon-Documents-ym-work-ai-bifang_codex_usage_collect"
+                "-Users-example-Documents-projects-sample_project"
             ),
-            Some("bifang_codex_usage_collect".to_owned())
+            Some("sample_project".to_owned())
         );
         assert_eq!(
             claude_project_display_label("project-a"),
@@ -129,8 +129,8 @@ mod tests {
     #[test]
     fn grok_encoded_cwd_uses_final_segment() {
         assert_eq!(
-            grok_project_display_label("%2FUsers%2Fme%2Fbifang_codex_usage_collect"),
-            Some("bifang_codex_usage_collect".to_owned())
+            grok_project_display_label("%2FUsers%2Fme%2Fsample_project"),
+            Some("sample_project".to_owned())
         );
         assert_eq!(
             grok_project_display_label("plain-project"),

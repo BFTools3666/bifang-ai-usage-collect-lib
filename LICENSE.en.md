@@ -4,7 +4,7 @@
 >
 > IMPORTANT: This is not an open-source license. Before commercial sale or delivery, this template should be reviewed by qualified counsel in the Licensor's jurisdiction and each target market. The applicable signed commercial agreement, order form, or license certificate identifies the Licensor, Licensee, fees, term, license quantities, and any special grants.
 
-**Applicable Project Name: 毕方AI用量看板. During downstream instantiation, only this name must be replaced with the confirmed target project name; renaming must not modify any other term of this Agreement.**
+**Applicable Project Name: RankFocus. During downstream instantiation, only this name must be replaced with the confirmed target project name; renaming must not modify any other term of this Agreement.**
 
 ## 1. Definitions
 

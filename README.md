@@ -2,7 +2,7 @@
 
 独立 Rust 依赖包，提供 Codex、Claude Code、Grok、ZCode 和 WorkBuddy 本机用量的只读获取，以及 Token 校验、规范化、去重和通用统计。最低 Rust 为 1.95，edition 为 2024。
 
-本目录被产品根 workspace 显式排除，清单、版本和锁文件独立维护。其他 Rust 应用直接引用本包即可，无需依赖毕方面板、Tauri、SQLite 或异步运行时：
+本目录被产品根 workspace 显式排除，清单、版本和锁文件独立维护。其他 Rust 应用直接引用本包即可，无需依赖盯排名面板、Tauri、SQLite 或异步运行时：
 
 ```toml
 [dependencies]
