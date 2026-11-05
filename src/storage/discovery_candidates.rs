@@ -175,6 +175,23 @@ impl LocalIndex {
         self.scan_connection().query_all_raw(statement("SELECT candidate_id, access_path, strategy, evidence FROM discovery_candidates ORDER BY candidate_id", vec![])).await.into_local_result()?.into_iter().map(|row| decode(row, client)).collect()
     }
 
+    /// 清空该 Agent 尚未确认的全部发现候选，不触碰已登记根和统计；返回清除数量。
+    ///
+    /// 用于用户明确放弃一轮发现（如跳过初始化扫描）后，避免残留候选被之后的页面自动登记。
+    /// # Errors
+    /// Agent 未绑定、扫描忙或 SQLite 失败时返回稳定错误，不部分提交。
+    pub async fn clear_discovery_candidates(&mut self) -> Result<u64, LocalError> {
+        self.discovery_client()?;
+        let transaction = self.candidate_transaction().await?;
+        let cleared = transaction
+            .execute_raw(statement("DELETE FROM discovery_candidates", vec![]))
+            .await
+            .into_local_result()?
+            .rows_affected();
+        transaction.commit().await.into_local_result()?;
+        Ok(cleared)
+    }
+
     /// 在同一事务中确认当前候选、登记根并移除候选，不触发 Token 扫描。
     ///
     /// 宿主在调用前必须重新验证候选位置仍符合本机来源访问边界。

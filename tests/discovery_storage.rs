@@ -30,6 +30,65 @@ fn candidate(base: &Path, client: SourceClientKind) -> RootCandidate {
     }
 }
 
+/// 清空候选只删除未确认候选，不影响已登记根，且重复清空返回零。
+#[tokio::test]
+async fn clearing_candidates_keeps_confirmed_roots() {
+    let base = tempfile::tempdir().expect("database base");
+    let client = SourceClientKind::Codex;
+    let mut index = LocalIndex::open(base.path(), Path::new("codex.db"), client)
+        .await
+        .expect("new agent database");
+    let confirmed = candidate(base.path(), client);
+    index
+        .save_discovery_candidate(&confirmed)
+        .await
+        .expect("candidate saved");
+    index
+        .confirm_discovery_candidate(&confirmed, "safe alias")
+        .await
+        .expect("confirmation commits");
+    let pending_path = base.path().join("pending-root");
+    let pending = RootCandidate {
+        id: stable_id(
+            client.candidate_namespace(),
+            &ai_usage_collect_scan::path_key(&pending_path),
+        ),
+        absolute_path: pending_path,
+        ..confirmed.clone()
+    };
+    assert!(
+        index
+            .save_discovery_candidate(&pending)
+            .await
+            .expect("pending candidate saved"),
+        "pending candidate must be newly stored"
+    );
+
+    assert_eq!(
+        index.clear_discovery_candidates().await.expect("cleared"),
+        1
+    );
+    assert_eq!(
+        index
+            .clear_discovery_candidates()
+            .await
+            .expect("idempotent"),
+        0
+    );
+    drop(index);
+    let reopened = LocalIndex::open(base.path(), Path::new("codex.db"), client)
+        .await
+        .expect("reopen");
+    assert!(
+        reopened
+            .discovery_candidates()
+            .await
+            .expect("none left")
+            .is_empty()
+    );
+    assert_eq!(reopened.all_roots().await.expect("roots kept").len(), 1);
+}
+
 /// 候选位置跨连接存在，分库隔离、去重且确认前不激活任何来源。
 #[tokio::test]
 async fn discovery_positions_survive_reopen_and_confirmation_is_atomic() {

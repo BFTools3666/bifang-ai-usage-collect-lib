@@ -363,8 +363,7 @@ fn report_completed_roots(
             ordinal: u64::try_from(ordinal).unwrap_or(u64::MAX),
             directories: stat.directories,
             file_names: stat.file_names,
-            elapsed_ms: u64::try_from(traversal_started.elapsed().as_millis())
-                .unwrap_or(u64::MAX),
+            elapsed_ms: u64::try_from(traversal_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         });
     }
 }

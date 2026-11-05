@@ -53,11 +53,10 @@ fn fair_jobs_do_not_resume_ancestors_while_deeper_work_is_dispatched() {
 /// 遍历每个搜索根完成时各发出一次带计数的诊断事件，最后发出阶段结束事件，且不含完整路径。
 #[test]
 fn traversal_reports_each_root_once_and_the_phase_end() {
-    use crate::{
-        RootDiscoveryDiagnostic, RootDiscoveryPlatform, RootDiscoveryScope,
-        RootDiscoveryStrategy,
-    };
     use crate::readers::LocalVolumeRoots;
+    use crate::{
+        RootDiscoveryDiagnostic, RootDiscoveryPlatform, RootDiscoveryScope, RootDiscoveryStrategy,
+    };
     use std::sync::{Arc, Mutex};
 
     let temp = tempfile::tempdir().expect("isolated metadata fixture");
