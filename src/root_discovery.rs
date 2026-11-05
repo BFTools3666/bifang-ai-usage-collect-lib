@@ -189,6 +189,15 @@ pub enum RootDiscoveryDiagnostic {
         /// 本根查询耗时毫秒。
         elapsed_ms: u64,
     },
+    /// 系统索引请求超时，整个系统索引阶段被熔断，剩余搜索根不再查询。
+    SystemIndexAbandoned {
+        /// 触发熔断的搜索根目录名末段。
+        root: String,
+        /// 触发熔断的搜索根序号，从 0 开始。
+        ordinal: u64,
+        /// 触发熔断的单次请求等待时长毫秒。
+        waited_ms: u64,
+    },
     /// 整个系统索引阶段结束。
     SystemIndexFinished {
         /// 至少一次查询成功。

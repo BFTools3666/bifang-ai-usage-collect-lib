@@ -61,6 +61,19 @@ impl Drop for RootQueryTrace<'_> {
     }
 }
 
+/// 熔断：任一系统索引请求超时即放弃整个系统索引阶段。
+///
+/// 索引器对该请求是“挂住”而不是快速报错，继续逐根重试只会让每个根都白等一个超时；
+/// 系统索引只是加速，目录遍历随后仍会完整覆盖。
+#[cfg(target_os = "windows")]
+fn trip_circuit_breaker(coordinator: &RootDiscoveryCoordinator, trace: &RootQueryTrace<'_>) {
+    coordinator.emit_diagnostic(crate::RootDiscoveryDiagnostic::SystemIndexAbandoned {
+        root: trace.root.clone(),
+        ordinal: trace.ordinal,
+        waited_ms: u64::try_from(trace.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    });
+}
+
 /// Windows 通过进程内 WinRT Search API 分页查询索引中的 JSONL 路径。
 #[cfg(target_os = "windows")]
 pub(super) fn query(
@@ -70,7 +83,7 @@ pub(super) fn query(
     mut on_path: impl FnMut(PathBuf),
 ) -> bool {
     use std::future::IntoFuture;
-    use wait::{INDEX_OPERATION_TIMEOUT, wait_for_operation};
+    use wait::{INDEX_OPERATION_TIMEOUT, WaitOutcome, wait_for_operation};
     use windows::Storage::Search::{FolderDepth, IndexerOption, QueryOptions};
     use windows::Storage::StorageFolder;
     use windows::core::HSTRING;
@@ -91,7 +104,7 @@ pub(super) fn query(
         return false;
     }
     let mut any_query_succeeded = false;
-    for (ordinal, root) in volumes.search_roots.iter().enumerate() {
+    'roots: for (ordinal, root) in volumes.search_roots.iter().enumerate() {
         if coordinator.is_cancel_requested() {
             break;
         }
@@ -110,15 +123,20 @@ pub(super) fn query(
         else {
             continue;
         };
-        let Some(folder) = wait_for_operation(
+        let folder = match wait_for_operation(
             folder_operation.clone().into_future(),
             coordinator,
             INDEX_OPERATION_TIMEOUT,
             || {
                 let _ = folder_operation.Cancel();
             },
-        ) else {
-            continue;
+        ) {
+            WaitOutcome::Ready(folder) => folder,
+            WaitOutcome::TimedOut => {
+                trip_circuit_breaker(coordinator, &trace);
+                break 'roots;
+            }
+            WaitOutcome::Stopped => continue,
         };
         let Ok(query) = folder.CreateFileQueryWithOptions(&options) else {
             continue;
@@ -131,15 +149,20 @@ pub(super) fn query(
             let Ok(operation) = query.GetFilesAsync(offset, 512) else {
                 break;
             };
-            let Some(files) = wait_for_operation(
+            let files = match wait_for_operation(
                 operation.clone().into_future(),
                 coordinator,
                 INDEX_OPERATION_TIMEOUT,
                 || {
                     let _ = operation.Cancel();
                 },
-            ) else {
-                break;
+            ) {
+                WaitOutcome::Ready(files) => files,
+                WaitOutcome::TimedOut => {
+                    trip_circuit_breaker(coordinator, &trace);
+                    break 'roots;
+                }
+                WaitOutcome::Stopped => break,
             };
             any_query_succeeded = true;
             let Ok(size) = files.Size() else {

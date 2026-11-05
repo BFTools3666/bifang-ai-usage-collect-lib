@@ -6,8 +6,11 @@ use std::time::{Duration, Instant};
 
 use crate::RootDiscoveryCoordinator;
 
-/// 单个系统索引请求超过五秒即放弃加速，完整目录遍历仍负责覆盖证明。
-pub(super) const INDEX_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// 单个系统索引请求超过两秒即放弃加速，完整目录遍历仍负责覆盖证明。
+///
+/// 实测部分目录（如以点开头的隐藏目录）的请求会一直不返回；系统索引只是加速，
+/// 等待越久只会让界面计数停在零越久，因此上限取两秒。
+pub(super) const INDEX_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 /// 取消最多等待一段二十五毫秒轮询间隔，不在 WinRT join 内无限阻塞。
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -26,13 +29,24 @@ impl<C: FnOnce()> Drop for OperationCancellation<C> {
     }
 }
 
+/// 一次系统索引请求的等待结果；超时与其它放弃原因分开，调用方据此决定是否熔断整个阶段。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WaitOutcome<T> {
+    /// 系统在期限内成功返回。
+    Ready(T),
+    /// 到期仍未返回：索引器对该请求挂住，继续查询其它根大概率同样浪费时间。
+    TimedOut,
+    /// 系统明确返回错误或用户取消；代价很小，只放弃本次请求。
+    Stopped,
+}
+
 /// 等待已经启动的异步系统请求；完成错误、截止或用户取消均放弃本次加速。
 pub(super) fn wait_for_operation<T, E>(
     future: impl Future<Output = Result<T, E>>,
     coordinator: &RootDiscoveryCoordinator,
     timeout: Duration,
     cancel: impl FnOnce(),
-) -> Option<T> {
+) -> WaitOutcome<T> {
     let deadline = Instant::now() + timeout;
     let mut cancellation = OperationCancellation {
         cancel: Some(cancel),
@@ -40,15 +54,18 @@ pub(super) fn wait_for_operation<T, E>(
     let mut future = std::pin::pin!(future);
     let mut context = Context::from_waker(Waker::noop());
     loop {
-        if coordinator.is_cancel_requested() || Instant::now() >= deadline {
-            return None;
+        if coordinator.is_cancel_requested() {
+            return WaitOutcome::Stopped;
+        }
+        if Instant::now() >= deadline {
+            return WaitOutcome::TimedOut;
         }
         if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
             if let Ok(value) = result {
                 cancellation.cancel.take();
-                return Some(value);
+                return WaitOutcome::Ready(value);
             }
-            return None;
+            return WaitOutcome::Stopped;
         }
         std::thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
     }
@@ -84,9 +101,18 @@ mod tests {
                 INDEX_OPERATION_TIMEOUT,
                 || cancelled.set(true),
             );
-            assert_eq!(actual, result.ok());
+            assert_eq!(
+                actual,
+                result.map_or(WaitOutcome::Stopped, WaitOutcome::Ready)
+            );
             assert_eq!(cancelled.get(), result.is_err());
         }
+    }
+
+    /// 单次系统索引请求的等待上限不得超过两秒，避免界面计数长时间停在零。
+    #[test]
+    fn index_operation_timeout_stays_short() {
+        assert!(INDEX_OPERATION_TIMEOUT <= Duration::from_secs(2));
     }
 
     /// 永不完成的加速器只等待本次截止，并恰好发送一次系统取消。
@@ -101,13 +127,13 @@ mod tests {
                 Duration::from_millis(10),
                 || cancellations.set(cancellations.get() + 1)
             ),
-            None
+            WaitOutcome::TimedOut
         );
         assert_eq!(cancellations.get(), 1);
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
-    /// 请求发出后取消也能离开等待；不必等到五秒截止或系统完成。
+    /// 请求发出后取消也能离开等待；不必等到截止或系统完成。
     #[test]
     fn cancellation_during_pending_operation_stops_before_the_deadline() {
         let coordinator = coordinator();
@@ -121,7 +147,7 @@ mod tests {
             wait_for_operation(future, &coordinator, INDEX_OPERATION_TIMEOUT, || {
                 cancellations.set(cancellations.get() + 1)
             }),
-            None
+            WaitOutcome::Stopped
         );
         assert_eq!(cancellations.get(), 1);
         assert!(started.elapsed() < Duration::from_secs(1));
