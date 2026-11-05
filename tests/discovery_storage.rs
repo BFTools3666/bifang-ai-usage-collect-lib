@@ -458,6 +458,63 @@ async fn older_own_database_is_removed_and_rebuilt() {
     assert!(has_index);
 }
 
+/// 多个打开者同时发现同一个旧库时，只备份一次、全部成功，且没有谁删掉别人刚重建的新库。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_opens_rebuild_an_older_database_exactly_once() {
+    let base = tempfile::tempdir().expect("database base");
+    let client = SourceClientKind::Codex;
+    let index = LocalIndex::open(base.path(), Path::new("codex.db"), client)
+        .await
+        .expect("new agent database");
+    index
+        .test_connection()
+        .execute_unprepared("PRAGMA user_version = 1;")
+        .await
+        .expect("simulate the previous format version");
+    drop(index);
+
+    let opens = (0..6).map(|_| {
+        let dir = base.path().to_path_buf();
+        tokio::spawn(async move {
+            LocalIndex::open(&dir, Path::new("codex.db"), client)
+                .await
+                .map(|_| ())
+        })
+    });
+    for outcome in futures_join_all(opens).await {
+        outcome
+            .expect("open task joins")
+            .expect("every concurrent open succeeds");
+    }
+    let backups = std::fs::read_dir(base.path())
+        .expect("directory lists")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".zip"))
+        .count();
+    assert_eq!(backups, 1, "the older database is backed up exactly once");
+    let reopened = LocalIndex::open(base.path(), Path::new("codex.db"), client)
+        .await
+        .expect("rebuilt database stays usable");
+    assert!(
+        reopened
+            .discovery_candidates()
+            .await
+            .expect("readable")
+            .is_empty()
+    );
+}
+
+/// 依次等待一组已派生的任务；避免为测试引入额外依赖。
+async fn futures_join_all<T>(
+    handles: impl Iterator<Item = tokio::task::JoinHandle<T>>,
+) -> Vec<Result<T, tokio::task::JoinError>> {
+    let mut results = Vec::new();
+    for handle in handles.collect::<Vec<_>>() {
+        results.push(handle.await);
+    }
+    results
+}
+
 /// 别人的 SQLite 文件（应用标识不同）绝不会被当作旧库删除。
 #[tokio::test]
 async fn foreign_database_is_never_removed() {

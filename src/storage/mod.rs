@@ -205,6 +205,9 @@ async fn open_database(
     relative_path: &Path,
     client: Option<crate::SourceClientKind>,
 ) -> Result<(DatabaseConnection, PathBuf), LocalError> {
+    // Windows 上删除仍被占用的旧库会让别人的首次打开被拒绝，所以整个打开按库路径串行。
+    let open_lock = open_lock_for(app_data_dir.join(relative_path));
+    let _serialized_open = open_lock.lock().await;
     let (connection, database_path) = open_private_sqlite(app_data_dir, relative_path)
         .await
         .map_err(map_private_sqlite_error)?;
@@ -214,14 +217,16 @@ async fn open_database(
         Err(error) if error.kind() == LocalErrorKind::UnsupportedSchema => {
             let stale_version = schema::stale_own_version(&connection).await.ok().flatten();
             let _ = connection.close().await;
-            let Some(stale_version) = stale_version else {
+            if stale_version.is_none() {
                 return Err(error);
-            };
+            }
             // 本应用早先版本创建的派生库：先打包备份，成功后才删除并按当前格式重建，
             // 下一次扫描重新索引；备份或删除任一步失败都保留原库并报告原错误。
-            if retire_stale_database(&database_path, stale_version)
-                .await
-                .is_err()
+            // 整个打开过程已按库路径串行，不会有其他打开者看到删除到一半的状态。
+            if let Some(stale_version) = stale_version
+                && retire_stale_database(&database_path, stale_version)
+                    .await
+                    .is_err()
             {
                 return Err(error);
             }
@@ -245,6 +250,21 @@ async fn open_database(
     enable_concurrent_snapshot_reads(&connection).await?;
 
     Ok((connection, database_path))
+}
+
+/// 每个统计库路径一把进程内互斥：同一个库的打开（含旧库备份重建）互相串行，不同库互不影响。
+static OPEN_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// 取得指定库路径的打开互斥；键只用于进程内去重，不做任何文件访问。
+fn open_lock_for(path: PathBuf) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    OPEN_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(path)
+        .or_default()
+        .clone()
 }
 
 /// 把旧库及其 WAL/共享内存旁文件打成 zip 放在原目录，返回备份文件路径。
@@ -312,17 +332,31 @@ async fn retire_stale_database(
             .unwrap_or(""),
         "an older statistics database was backed up beside itself and removed; the next scan rebuilds it"
     );
-    tokio::fs::remove_file(database_path).await?;
+    remove_file_with_retry(database_path).await?;
     for suffix in ["-wal", "-shm"] {
         let mut sidecar = database_path.as_os_str().to_owned();
         sidecar.push(suffix);
-        match tokio::fs::remove_file(&sidecar).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        remove_file_with_retry(Path::new(&sidecar)).await?;
     }
     Ok(())
+}
+
+/// 删除文件；文件已不存在视为成功。其他打开者的旧连接可能尚未关闭（Windows 上会因共享冲突
+/// 暂时删不掉），因此短退避重试有限次数后才把错误向上返回。
+async fn remove_file_with_retry(path: &Path) -> Result<(), std::io::Error> {
+    const MAX_ATTEMPTS: u32 = 40;
+    let mut attempt = 0_u32;
+    loop {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if attempt + 1 >= MAX_ATTEMPTS => return Err(error),
+            Err(_) => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
 }
 
 /// 让长时间扫描提交不阻塞新概览读取；模式持久保存在本机索引数据库中。
