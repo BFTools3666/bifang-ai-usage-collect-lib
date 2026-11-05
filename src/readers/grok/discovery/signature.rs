@@ -5,7 +5,7 @@ pub use super::super::super::discovery::agent_probe::{
     reject_link_components,
 };
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use crate::RootCandidateEvidence;
@@ -169,17 +169,18 @@ fn inspect_updates_file(path: &Path, budget: &mut SignatureBudget<'_>) -> Inspec
         if records >= MAX_SIGNATURE_RECORDS_PER_FILE {
             return Inspection::Rejected;
         }
-        line.clear();
-        let read = match reader.read_until(b'\n', &mut line) {
-            Ok(0) => return Inspection::Rejected,
-            Ok(read) => read as u64,
-            Err(_) => return Inspection::Indeterminate,
-        };
+        let (read, oversize) =
+            match read_bounded_line(&mut reader, &mut line, budget.remaining_bytes) {
+                Ok(LineRead::Eof) => return Inspection::Rejected,
+                Ok(LineRead::Line(read)) => (read, false),
+                Ok(LineRead::Oversize(read)) => (read, true),
+                Err(_) => return Inspection::Indeterminate,
+            };
         if budget.remaining_bytes < read {
             return Inspection::BudgetExhausted;
         }
         budget.remaining_bytes -= read;
-        if read > MAX_SIGNATURE_LINE_BYTES {
+        if oversize {
             continue;
         }
         records += 1;
@@ -193,6 +194,59 @@ fn inspect_updates_file(path: &Path, budget: &mut SignatureBudget<'_>) -> Inspec
             return Inspection::Found(RootCandidateEvidence::GrokSessionUpdates);
         }
     }
+}
+
+/// 一次有界读行的结果；超长行不会进入缓冲，只记录已消耗的字节数。
+#[derive(Debug, PartialEq, Eq)]
+enum LineRead {
+    /// 文件结束，没有更多内容。
+    Eof,
+    /// 不超过上限的一行（含换行符）已读入缓冲，值为消耗的字节数。
+    Line(u64),
+    /// 超过上限的一行：已丢弃其余内容，值为消耗的字节数（可能超过 `byte_allowance`）。
+    Oversize(u64),
+}
+
+/// 读取一行，缓冲最多保留 `MAX_SIGNATURE_LINE_BYTES + 1` 字节。
+///
+/// 超长行的剩余部分只被消耗、不被缓冲；累计消耗超过 `byte_allowance` 即停止并返回，
+/// 由调用方按预算耗尽处理，避免一个没有换行的巨大文件被整行读入内存。
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    byte_allowance: u64,
+) -> std::io::Result<LineRead> {
+    line.clear();
+    let read = reader
+        .by_ref()
+        .take(MAX_SIGNATURE_LINE_BYTES + 1)
+        .read_until(b'\n', line)? as u64;
+    if read == 0 {
+        return Ok(LineRead::Eof);
+    }
+    if read <= MAX_SIGNATURE_LINE_BYTES {
+        return Ok(LineRead::Line(read));
+    }
+    // 超长：缓冲只保留上限内的内容，其余字节边读边丢，直到换行、文件结束或超出预算。
+    let mut consumed = read;
+    let mut complete = line.last() == Some(&b'\n');
+    line.clear();
+    while !complete && consumed <= byte_allowance {
+        let buffered = reader.fill_buf()?;
+        if buffered.is_empty() {
+            break;
+        }
+        let take = match buffered.iter().position(|byte| *byte == b'\n') {
+            Some(newline) => {
+                complete = true;
+                newline + 1
+            }
+            None => buffered.len(),
+        };
+        reader.consume(take);
+        consumed = consumed.saturating_add(take as u64);
+    }
+    Ok(LineRead::Oversize(consumed))
 }
 
 /// 判断一行 JSON 是否携带可计入索引的已完成总量。
@@ -233,4 +287,91 @@ pub fn safe_alias(path: &Path) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("Grok 数据根")
         .to_owned()
+}
+
+#[cfg(test)]
+mod bounded_line_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// 普通行按原样读入，含换行符，字节数与读入长度一致。
+    #[test]
+    fn short_lines_are_read_whole() {
+        let mut reader = Cursor::new(b"{\"a\":1}\nnext\n".to_vec());
+        let mut line = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            LineRead::Line(8)
+        );
+        assert_eq!(line, b"{\"a\":1}\n");
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            LineRead::Line(5)
+        );
+    }
+
+    /// 没有换行的超大内容不会整体进入缓冲：缓冲被清空，消耗字节数仍如实返回。
+    #[test]
+    fn oversize_line_without_newline_is_not_buffered() {
+        let total = MAX_SIGNATURE_LINE_BYTES * 3;
+        let mut reader = Cursor::new(vec![b'x'; total as usize]);
+        let mut line = Vec::new();
+        let result = read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read");
+        assert_eq!(result, LineRead::Oversize(total));
+        assert!(line.is_empty());
+        assert!(line.capacity() <= (MAX_SIGNATURE_LINE_BYTES as usize) * 2);
+    }
+
+    /// 超长行之后的下一行仍可正常读取，且不被超长行吞掉。
+    #[test]
+    fn the_line_after_an_oversize_line_is_intact() {
+        let mut data = vec![b'x'; (MAX_SIGNATURE_LINE_BYTES + 10) as usize];
+        data.push(b'\n');
+        data.extend_from_slice(b"ok\n");
+        let mut reader = Cursor::new(data);
+        let mut line = Vec::new();
+        assert!(matches!(
+            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            LineRead::Oversize(_)
+        ));
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            LineRead::Line(3)
+        );
+        assert_eq!(line, b"ok\n");
+    }
+
+    /// 超长行的恰好上限+1 字节且以换行结尾时，不会多吞下一行。
+    #[test]
+    fn oversize_line_ending_exactly_at_the_read_limit_does_not_swallow_the_next_line() {
+        let mut data = vec![b'x'; MAX_SIGNATURE_LINE_BYTES as usize];
+        data.push(b'\n');
+        data.extend_from_slice(b"ok\n");
+        let mut reader = Cursor::new(data);
+        let mut line = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            LineRead::Oversize(MAX_SIGNATURE_LINE_BYTES + 1)
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            LineRead::Line(3)
+        );
+    }
+
+    /// 超出字节预算时提前停止丢弃，返回值大于预算由调用方判定耗尽，不读完整个流。
+    #[test]
+    fn discarding_stops_once_the_byte_allowance_is_exceeded() {
+        let total = MAX_SIGNATURE_LINE_BYTES * 8;
+        let mut reader = Cursor::new(vec![b'x'; total as usize]);
+        let mut line = Vec::new();
+        let allowance = MAX_SIGNATURE_LINE_BYTES;
+        match read_bounded_line(&mut reader, &mut line, allowance).expect("read") {
+            LineRead::Oversize(consumed) => {
+                assert!(consumed > allowance);
+                assert!(consumed < total);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
 }

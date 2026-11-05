@@ -312,7 +312,16 @@ fn inspect_candidates(
         }
     }
 
-    let _ = existing_ids;
+    // 预算耗尽中止时尚未检查到的已登记根既不确认也不判定无效，必须保留旧登记。
+    if budget_exhausted {
+        for id in existing_ids {
+            let confirmed = roots.values().any(|root| root.root_id == id)
+                || confirmed_invalid_ids.contains(&id);
+            if !confirmed {
+                unconfirmed_ids.insert(id);
+            }
+        }
+    }
     GrokDiscoveryResult {
         coverage: CoverageReport {
             state: coverage_state(
@@ -335,3 +344,6 @@ fn inspect_candidates(
         network_skipped_count,
     }
 }
+
+#[cfg(test)]
+mod tests;
