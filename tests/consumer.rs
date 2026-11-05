@@ -13,6 +13,29 @@ use ai_usage_collect_scan::{
     canonicalize_usage_calls,
 };
 
+/// 原目录消费入口继续对外可用，空目录在既有预算内完整结束。
+#[test]
+fn legacy_whole_directory_entry_remains_available_to_consumers() {
+    use ai_usage_collect_scan::readers::directory::{VisitWindow, visit_directory};
+    use ai_usage_collect_scan::readers::file_source::RolloutProbeBudget;
+    let root = tempfile::tempdir().expect("isolated consumer directory");
+    let result = visit_directory(
+        root.path().to_path_buf(),
+        root.path().to_path_buf(),
+        u64::MAX,
+        &VisitWindow {
+            scan_since_epoch_ms: i64::MIN,
+            known_sources: Default::default(),
+        },
+        &ScanCancellation::new(),
+        RolloutProbeBudget::new(10, 1024),
+    )
+    .expect("legacy API works");
+    assert!(result.enumeration_complete);
+    assert!(!result.cancelled);
+    assert!(result.actions.is_empty());
+}
+
 /// 外部客户端用自己的内存 sink 保存扫描结果，来源文件及目录不被扫描包写入。
 #[test]
 fn discovers_and_reads_usage_without_creating_storage() {

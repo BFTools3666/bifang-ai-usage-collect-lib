@@ -5,7 +5,7 @@ pub use super::super::super::discovery::agent_probe::{
     reject_link_components,
 };
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::RootCandidateEvidence;
@@ -169,13 +169,18 @@ fn inspect_updates_file(path: &Path, budget: &mut SignatureBudget<'_>) -> Inspec
         if records >= MAX_SIGNATURE_RECORDS_PER_FILE {
             return Inspection::Rejected;
         }
-        let (read, oversize) =
-            match read_bounded_line(&mut reader, &mut line, budget.remaining_bytes) {
-                Ok(LineRead::Eof) => return Inspection::Rejected,
-                Ok(LineRead::Line(read)) => (read, false),
-                Ok(LineRead::Oversize(read)) => (read, true),
-                Err(_) => return Inspection::Indeterminate,
-            };
+        let (read, oversize) = match read_bounded_line(
+            &mut reader,
+            &mut line,
+            budget.remaining_bytes,
+            budget.cancellation,
+        ) {
+            Ok(LineRead::Eof) => return Inspection::Rejected,
+            Ok(LineRead::Cancelled) => return Inspection::Cancelled,
+            Ok(LineRead::Line(read)) => (read, false),
+            Ok(LineRead::Oversize(read)) => (read, true),
+            Err(_) => return Inspection::Indeterminate,
+        };
         if budget.remaining_bytes < read {
             return Inspection::BudgetExhausted;
         }
@@ -199,6 +204,8 @@ fn inspect_updates_file(path: &Path, budget: &mut SignatureBudget<'_>) -> Inspec
 /// 一次有界读行的结果；超长行不会进入缓冲，只记录已消耗的字节数。
 #[derive(Debug, PartialEq, Eq)]
 enum LineRead {
+    /// 在读取块之间收到取消，调用方不得把未完成读取判为否定签名。
+    Cancelled,
     /// 文件结束，没有更多内容。
     Eof,
     /// 不超过上限的一行（含换行符）已读入缓冲，值为消耗的字节数。
@@ -215,38 +222,47 @@ fn read_bounded_line<R: BufRead>(
     reader: &mut R,
     line: &mut Vec<u8>,
     byte_allowance: u64,
+    cancellation: &impl crate::CancellationSignal,
 ) -> std::io::Result<LineRead> {
+    // 即使调用方的 BufRead 一次暴露整文件，也只消费一个固定块后重新检查取消。
+    const READ_CHUNK_BYTES: usize = 8 * 1024;
     line.clear();
-    let read = reader
-        .by_ref()
-        .take(MAX_SIGNATURE_LINE_BYTES + 1)
-        .read_until(b'\n', line)? as u64;
-    if read == 0 {
-        return Ok(LineRead::Eof);
-    }
-    if read <= MAX_SIGNATURE_LINE_BYTES {
-        return Ok(LineRead::Line(read));
-    }
-    // 超长：缓冲只保留上限内的内容，其余字节边读边丢，直到换行、文件结束或超出预算。
-    let mut consumed = read;
-    let mut complete = line.last() == Some(&b'\n');
-    line.clear();
-    while !complete && consumed <= byte_allowance {
+    let mut consumed = 0_u64;
+    let mut oversize = false;
+    loop {
+        if cancellation.is_cancelled() {
+            line.clear();
+            return Ok(LineRead::Cancelled);
+        }
         let buffered = reader.fill_buf()?;
         if buffered.is_empty() {
-            break;
+            return Ok(if consumed == 0 {
+                LineRead::Eof
+            } else if oversize {
+                LineRead::Oversize(consumed)
+            } else {
+                LineRead::Line(consumed)
+            });
         }
-        let take = match buffered.iter().position(|byte| *byte == b'\n') {
-            Some(newline) => {
-                complete = true;
-                newline + 1
-            }
-            None => buffered.len(),
-        };
-        reader.consume(take);
+        let chunk = &buffered[..buffered.len().min(READ_CHUNK_BYTES)];
+        let newline = chunk.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(chunk.len(), |position| position + 1);
         consumed = consumed.saturating_add(take as u64);
+        if !oversize && consumed <= MAX_SIGNATURE_LINE_BYTES {
+            line.extend_from_slice(&chunk[..take]);
+        } else {
+            oversize = true;
+            line.clear();
+        }
+        reader.consume(take);
+        if newline.is_some() || (oversize && consumed > byte_allowance) {
+            return Ok(if oversize {
+                LineRead::Oversize(consumed)
+            } else {
+                LineRead::Line(consumed)
+            });
+        }
     }
-    Ok(LineRead::Oversize(consumed))
 }
 
 /// 判断一行 JSON 是否携带可计入索引的已完成总量。
@@ -294,18 +310,49 @@ mod bounded_line_tests {
     use super::*;
     use std::io::Cursor;
 
+    /// 已超过单行上限后仍逐块响应取消，不必读完整个没有换行的文件。
+    #[test]
+    fn cancellation_during_oversize_discard_stops_before_eof() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let total = (MAX_SIGNATURE_LINE_BYTES * 3) as usize;
+        let mut reader = Cursor::new(vec![b'x'; total]);
+        let checks = AtomicUsize::new(0);
+        let cancellation = || checks.fetch_add(1, Ordering::SeqCst) > 130;
+        let mut line = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, u64::MAX, &cancellation)
+                .expect("cancellation is a normal outcome"),
+            LineRead::Cancelled
+        );
+        assert!(reader.position() > MAX_SIGNATURE_LINE_BYTES);
+        assert!(reader.position() < total as u64);
+        assert!(line.is_empty());
+    }
+
     /// 普通行按原样读入，含换行符，字节数与读入长度一致。
     #[test]
     fn short_lines_are_read_whole() {
         let mut reader = Cursor::new(b"{\"a\":1}\nnext\n".to_vec());
         let mut line = Vec::new();
         assert_eq!(
-            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            read_bounded_line(
+                &mut reader,
+                &mut line,
+                u64::MAX,
+                &crate::ScanCancellation::new()
+            )
+            .expect("read"),
             LineRead::Line(8)
         );
         assert_eq!(line, b"{\"a\":1}\n");
         assert_eq!(
-            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            read_bounded_line(
+                &mut reader,
+                &mut line,
+                u64::MAX,
+                &crate::ScanCancellation::new()
+            )
+            .expect("read"),
             LineRead::Line(5)
         );
     }
@@ -316,7 +363,13 @@ mod bounded_line_tests {
         let total = MAX_SIGNATURE_LINE_BYTES * 3;
         let mut reader = Cursor::new(vec![b'x'; total as usize]);
         let mut line = Vec::new();
-        let result = read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read");
+        let result = read_bounded_line(
+            &mut reader,
+            &mut line,
+            u64::MAX,
+            &crate::ScanCancellation::new(),
+        )
+        .expect("read");
         assert_eq!(result, LineRead::Oversize(total));
         assert!(line.is_empty());
         assert!(line.capacity() <= (MAX_SIGNATURE_LINE_BYTES as usize) * 2);
@@ -331,11 +384,23 @@ mod bounded_line_tests {
         let mut reader = Cursor::new(data);
         let mut line = Vec::new();
         assert!(matches!(
-            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            read_bounded_line(
+                &mut reader,
+                &mut line,
+                u64::MAX,
+                &crate::ScanCancellation::new()
+            )
+            .expect("read"),
             LineRead::Oversize(_)
         ));
         assert_eq!(
-            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            read_bounded_line(
+                &mut reader,
+                &mut line,
+                u64::MAX,
+                &crate::ScanCancellation::new()
+            )
+            .expect("read"),
             LineRead::Line(3)
         );
         assert_eq!(line, b"ok\n");
@@ -350,11 +415,23 @@ mod bounded_line_tests {
         let mut reader = Cursor::new(data);
         let mut line = Vec::new();
         assert_eq!(
-            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            read_bounded_line(
+                &mut reader,
+                &mut line,
+                u64::MAX,
+                &crate::ScanCancellation::new()
+            )
+            .expect("read"),
             LineRead::Oversize(MAX_SIGNATURE_LINE_BYTES + 1)
         );
         assert_eq!(
-            read_bounded_line(&mut reader, &mut line, u64::MAX).expect("read"),
+            read_bounded_line(
+                &mut reader,
+                &mut line,
+                u64::MAX,
+                &crate::ScanCancellation::new()
+            )
+            .expect("read"),
             LineRead::Line(3)
         );
     }
@@ -366,7 +443,14 @@ mod bounded_line_tests {
         let mut reader = Cursor::new(vec![b'x'; total as usize]);
         let mut line = Vec::new();
         let allowance = MAX_SIGNATURE_LINE_BYTES;
-        match read_bounded_line(&mut reader, &mut line, allowance).expect("read") {
+        match read_bounded_line(
+            &mut reader,
+            &mut line,
+            allowance,
+            &crate::ScanCancellation::new(),
+        )
+        .expect("read")
+        {
             LineRead::Oversize(consumed) => {
                 assert!(consumed > allowance);
                 assert!(consumed < total);

@@ -1,4 +1,4 @@
-//! 新产品统计数据库的唯一格式；仅初始化空库，不兼容或升级旧库。
+//! 统计数据库格式准入；只初始化空库，受确认的旧版本由独立备份重建边界处理。
 
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DbBackend, SqliteTransactionMode, Statement,
@@ -10,7 +10,7 @@ use crate::SourceClientKind;
 
 /// 统计数据库的固定格式身份，ASCII `AUS1`。
 pub(super) const APPLICATION_ID: i64 = 0x4155_5331;
-/// 当前统计格式仅接受版本一，其他版本必须重新扫描到新数据库。
+/// 当前统计格式为版本二，旧版本必须经过身份校验与备份后重新索引。
 pub(super) const SCHEMA_VERSION: i64 = 2;
 
 /// 一次建立最终表、布尔约束、外键及统计索引，不创建历史迁移记账表。
@@ -122,8 +122,8 @@ CREATE TABLE discovery_candidates (
 
 /// 若这是本应用早先版本创建的统计库（应用标识相同、版本更旧），返回其版本号。
 ///
-/// 统计库只是可由原始会话文件重建的派生数据，旧版本直接删除重建而不做迁移。
-/// 应用标识不同（别人的文件）或版本更新（可能来自更新的程序）一律返回 `None`，绝不据此删除。
+/// 此处只识别格式候选；调用方仍须核对 Agent 并完成私有备份后才能删除重建。
+/// 应用标识不同或版本更新时一律返回 `None`，不得据此删除。
 pub(super) async fn stale_own_version(
     connection: &DatabaseConnection,
 ) -> Result<Option<i64>, LocalError> {

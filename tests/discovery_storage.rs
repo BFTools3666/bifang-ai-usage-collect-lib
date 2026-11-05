@@ -6,7 +6,6 @@ use ai_usage_collect_scan::{
     LocalErrorKind, RootActivationState, RootCandidate, RootCandidateEvidence,
     RootDiscoveryStrategy, SourceClientKind, stable_id,
 };
-#[cfg(feature = "test-util")]
 use sea_orm::ConnectionTrait;
 use std::path::Path;
 
@@ -414,12 +413,8 @@ async fn older_own_database_is_removed_and_rebuilt() {
         .save_discovery_candidate(&candidate(base.path(), client))
         .await
         .expect("old data exists");
-    index
-        .test_connection()
-        .execute_unprepared("DROP INDEX source_files_root_idx; PRAGMA user_version = 1;")
-        .await
-        .expect("simulate a database created by the previous format version");
     drop(index);
+    mark_previous_schema(&base.path().join("codex.db")).await;
 
     let rebuilt = LocalIndex::open(base.path(), Path::new("codex.db"), client)
         .await
@@ -446,8 +441,13 @@ async fn older_own_database_is_removed_and_rebuilt() {
             .is_empty(),
         "old data is intentionally not preserved"
     );
-    let has_index = rebuilt
-        .test_connection()
+    let inspector = sea_orm::Database::connect(format!(
+        "sqlite://{}?mode=ro",
+        rebuilt.database_path().display()
+    ))
+    .await
+    .expect("read-only schema inspector");
+    let has_index = inspector
         .query_one_raw(sea_orm::Statement::from_string(
             sea_orm::DbBackend::Sqlite,
             "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'source_files_root_idx'",
@@ -466,12 +466,8 @@ async fn concurrent_opens_rebuild_an_older_database_exactly_once() {
     let index = LocalIndex::open(base.path(), Path::new("codex.db"), client)
         .await
         .expect("new agent database");
-    index
-        .test_connection()
-        .execute_unprepared("PRAGMA user_version = 1;")
-        .await
-        .expect("simulate the previous format version");
     drop(index);
+    mark_previous_schema(&base.path().join("codex.db")).await;
 
     let opens = (0..6).map(|_| {
         let dir = base.path().to_path_buf();
@@ -513,6 +509,53 @@ async fn futures_join_all<T>(
         results.push(handle.await);
     }
     results
+}
+
+/// 使用公开 SQLite 连接构造旧格式，不依赖可选的 test-util 接口。
+async fn mark_previous_schema(path: &Path) {
+    let connection = sea_orm::Database::connect(format!("sqlite://{}?mode=rw", path.display()))
+        .await
+        .expect("fixture database opens");
+    connection
+        .execute_unprepared("DROP INDEX source_files_root_idx; PRAGMA user_version = 1;")
+        .await
+        .expect("previous schema fixture");
+    connection.close().await.expect("fixture connection closes");
+}
+
+/// 旧格式仍须属于请求的 Agent；错配不能触发备份、删除或重新绑定。
+#[tokio::test]
+async fn older_database_rejects_another_agent_without_backup_or_rebuild() {
+    let base = tempfile::tempdir().expect("database base");
+    let path = base.path().join("codex.db");
+    let mut index = LocalIndex::open(base.path(), Path::new("codex.db"), SourceClientKind::Codex)
+        .await
+        .expect("original Codex database");
+    index
+        .save_discovery_candidate(&candidate(base.path(), SourceClientKind::Codex))
+        .await
+        .expect("original candidate");
+    drop(index);
+    mark_previous_schema(&path).await;
+    let original = std::fs::read(&path).expect("old database bytes");
+    let error = LocalIndex::open(
+        base.path(),
+        Path::new("codex.db"),
+        SourceClientKind::ClaudeCode,
+    )
+    .await
+    .expect_err("another Agent cannot rebuild this database");
+    assert_eq!(error.kind(), LocalErrorKind::InvalidUsage);
+    assert_eq!(
+        std::fs::read(&path).expect("old database remains"),
+        original
+    );
+    assert!(
+        !std::fs::read_dir(base.path())
+            .expect("directory lists")
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "zip"))
+    );
 }
 
 /// 别人的 SQLite 文件（应用标识不同）绝不会被当作旧库删除。

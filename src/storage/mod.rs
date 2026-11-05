@@ -16,6 +16,7 @@ pub use zcode::ZcodeDatabaseIndexOutcome;
 mod error;
 mod path_codec;
 mod private_sqlite;
+mod retirement;
 mod root_registry;
 mod scan_connection;
 mod schema;
@@ -38,6 +39,7 @@ pub use crate::{
 const USAGE_INDEX_FILE_NAME: &str = "test-index.db";
 use error::IntoLocalResult;
 use error::map_database_error;
+use retirement::retire_stale_database;
 use scan_connection::ScanConnection;
 
 use self::private_sqlite::{PrivateSqliteError, open_private_sqlite};
@@ -207,29 +209,33 @@ async fn open_database(
 ) -> Result<(DatabaseConnection, PathBuf), LocalError> {
     // Windows 上删除仍被占用的旧库会让别人的首次打开被拒绝，所以整个打开按库路径串行。
     let open_lock = open_lock_for(app_data_dir.join(relative_path));
-    let _serialized_open = open_lock.lock().await;
+    let serialized_open = open_lock.lock_owned().await;
     let (connection, database_path) = open_private_sqlite(app_data_dir, relative_path)
         .await
         .map_err(map_private_sqlite_error)?;
 
-    let connection = match schema::ensure_schema(&connection, client).await {
-        Ok(()) => connection,
+    let (connection, _serialized_open) = match schema::ensure_schema(&connection, client).await {
+        Ok(()) => (connection, serialized_open),
         Err(error) if error.kind() == LocalErrorKind::UnsupportedSchema => {
             let stale_version = schema::stale_own_version(&connection).await.ok().flatten();
-            let _ = connection.close().await;
-            if stale_version.is_none() {
+            let binding = if stale_version.is_some() {
+                binding::validate(&connection, client).await
+            } else {
+                Ok(())
+            };
+            let closed = connection.close().await;
+            binding?;
+            closed.map_err(map_database_error)?;
+            let Some(stale_version) = stale_version else {
                 return Err(error);
-            }
+            };
             // 本应用早先版本创建的派生库：先打包备份，成功后才删除并按当前格式重建，
             // 下一次扫描重新索引；备份或删除任一步失败都保留原库并报告原错误。
             // 整个打开过程已按库路径串行，不会有其他打开者看到删除到一半的状态。
-            if let Some(stale_version) = stale_version
-                && retire_stale_database(&database_path, stale_version)
+            let serialized_open =
+                retire_stale_database(&database_path, stale_version, serialized_open)
                     .await
-                    .is_err()
-            {
-                return Err(error);
-            }
+                    .map_err(|_| error)?;
             let (fresh, _) = open_private_sqlite(app_data_dir, relative_path)
                 .await
                 .map_err(map_private_sqlite_error)?;
@@ -237,7 +243,7 @@ async fn open_database(
                 let _ = fresh.close().await;
                 return Err(error);
             }
-            fresh
+            (fresh, serialized_open)
         }
         Err(error) => {
             let _ = connection.close().await;
@@ -265,98 +271,6 @@ fn open_lock_for(path: PathBuf) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         .entry(path)
         .or_default()
         .clone()
-}
-
-/// 把旧库及其 WAL/共享内存旁文件打成 zip 放在原目录，返回备份文件路径。
-///
-/// 备份名带旧版本号和时间戳且以“新建”方式写入，绝不覆盖已有文件；旁文件不存在时跳过。
-async fn backup_stale_database(
-    database_path: &Path,
-    stale_version: i64,
-) -> Result<PathBuf, std::io::Error> {
-    let database_path = database_path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let name = database_path
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .ok_or_else(|| std::io::Error::other("database file name is not valid UTF-8"))?
-            .to_owned();
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
-        let backup = database_path.with_file_name(format!("{name}.v{stale_version}-{stamp}.zip"));
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&backup)?;
-        let mut archive = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        for suffix in ["", "-wal", "-shm"] {
-            let entry = format!("{name}{suffix}");
-            let source = database_path.with_file_name(&entry);
-            let mut input = match std::fs::File::open(&source) {
-                Ok(input) => input,
-                Err(error) if suffix.is_empty() => return Err(error),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            archive
-                .start_file(entry, options)
-                .map_err(std::io::Error::other)?;
-            std::io::copy(&mut input, &mut archive)?;
-        }
-        archive.finish().map_err(std::io::Error::other)?;
-        Ok(backup)
-    })
-    .await
-    .map_err(|_| std::io::Error::other("database backup task failed"))?
-}
-
-/// 备份并删除本应用早先版本的统计库及其旁文件；备份失败时原库保持不动。
-async fn retire_stale_database(
-    database_path: &Path,
-    stale_version: i64,
-) -> Result<(), std::io::Error> {
-    let backup = backup_stale_database(database_path, stale_version).await?;
-    private_sqlite::set_private_database_permissions(&backup)
-        .await
-        .map_err(|_| std::io::Error::other("backup permissions could not be restricted"))?;
-    tracing::warn!(
-        kind = "statistics_database_rebuilt",
-        stale_version,
-        current_version = schema::SCHEMA_VERSION,
-        backup = backup
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or(""),
-        "an older statistics database was backed up beside itself and removed; the next scan rebuilds it"
-    );
-    remove_file_with_retry(database_path).await?;
-    for suffix in ["-wal", "-shm"] {
-        let mut sidecar = database_path.as_os_str().to_owned();
-        sidecar.push(suffix);
-        remove_file_with_retry(Path::new(&sidecar)).await?;
-    }
-    Ok(())
-}
-
-/// 删除文件；文件已不存在视为成功。其他打开者的旧连接可能尚未关闭（Windows 上会因共享冲突
-/// 暂时删不掉），因此短退避重试有限次数后才把错误向上返回。
-async fn remove_file_with_retry(path: &Path) -> Result<(), std::io::Error> {
-    const MAX_ATTEMPTS: u32 = 40;
-    let mut attempt = 0_u32;
-    loop {
-        match tokio::fs::remove_file(path).await {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) if attempt + 1 >= MAX_ATTEMPTS => return Err(error),
-            Err(_) => {
-                attempt += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        }
-    }
 }
 
 /// 让长时间扫描提交不阻塞新概览读取；模式持久保存在本机索引数据库中。
@@ -478,6 +392,8 @@ fn map_private_sqlite_error(error: PrivateSqliteError) -> LocalError {
 
 #[cfg(test)]
 mod read_snapshot_tests;
+#[cfg(test)]
+mod retirement_tests;
 #[cfg(test)]
 mod scan_publication_tests;
 #[cfg(test)]
