@@ -1,6 +1,6 @@
 //! 分片深度优先的元数据发现；工作集随目录深度而非整盘目录数增长。
 use super::scope::{candidate_from_file_name, is_unselected_agent_directory, priority_queue};
-use super::{MetadataDiscoverySummary, record_volume_scope_gaps, submit_candidate};
+use super::{MetadataDiscoverySummary, record_volume_scope_gaps, root_label, submit_candidate};
 use crate::readers::directory_cursor::DirectoryCursor;
 use crate::readers::discovery::metadata_is_link_like;
 use crate::readers::{LocalVolumeRoots, is_obviously_network_path};
@@ -275,7 +275,7 @@ pub(super) fn discover_metadata_roots_in_with_callback(
     }
     coordinator.update_progress(progress);
     coordinator.emit_diagnostic(crate::RootDiscoveryDiagnostic::TraversalFinished {
-        elapsed_ms: u64::try_from(traversal_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms: crate::duration_millis(traversal_started.elapsed()),
     });
     coordinator.finish(false, true);
     MetadataDiscoverySummary {
@@ -356,14 +356,11 @@ fn report_completed_roots(
         }
         stat.reported = true;
         coordinator.emit_diagnostic(crate::RootDiscoveryDiagnostic::TraversalRootFinished {
-            root: queue
-                .traversal_root
-                .file_name()
-                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            root: root_label(&queue.traversal_root),
             ordinal: u64::try_from(ordinal).unwrap_or(u64::MAX),
             directories: stat.directories,
             file_names: stat.file_names,
-            elapsed_ms: u64::try_from(traversal_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            elapsed_ms: crate::duration_millis(traversal_started.elapsed()),
         });
     }
 }

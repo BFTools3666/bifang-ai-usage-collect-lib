@@ -1,9 +1,6 @@
 //! canonical 调用聚合、与扫描运行记录的持久化。
 
-use sea_orm::{
-    ConnectionTrait, DbBackend, SqliteTransactionMode, Statement, TransactionOptions,
-    TransactionTrait,
-};
+use sea_orm::{ConnectionTrait, SqliteTransactionMode, TransactionOptions, TransactionTrait};
 use uuid::Uuid;
 
 use crate::{
@@ -22,10 +19,7 @@ use super::{
     map_database_error, stable_id,
 };
 
-/// 为快照维护操作构造带绑定值的 SQLite 语句。
-fn statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
-    Statement::from_sql_and_values(DbBackend::Sqlite, sql, values)
-}
+use crate::storage::sql::statement;
 
 /// 在调用方选择的事务边界内删除窗口外派生用量。
 async fn prune_usage_before_on<C: ConnectionTrait + ?Sized>(

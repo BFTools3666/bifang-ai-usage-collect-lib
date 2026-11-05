@@ -56,22 +56,25 @@ impl Drop for RootQueryTrace<'_> {
                 ordinal: self.ordinal,
                 pages: self.pages,
                 paths: self.paths,
-                elapsed_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                elapsed_ms: crate::duration_millis(self.started.elapsed()),
             });
     }
 }
 
-/// 熔断：任一系统索引请求超时即放弃整个系统索引阶段。
-///
-/// 索引器对该请求是“挂住”而不是快速报错，继续逐根重试只会让每个根都白等一个超时；
-/// 系统索引只是加速，目录遍历随后仍会完整覆盖。
 #[cfg(target_os = "windows")]
-fn trip_circuit_breaker(coordinator: &RootDiscoveryCoordinator, trace: &RootQueryTrace<'_>) {
-    coordinator.emit_diagnostic(crate::RootDiscoveryDiagnostic::SystemIndexAbandoned {
-        root: trace.root.clone(),
-        ordinal: trace.ordinal,
-        waited_ms: u64::try_from(trace.started.elapsed().as_millis()).unwrap_or(u64::MAX),
-    });
+impl RootQueryTrace<'_> {
+    /// 熔断：任一系统索引请求超时即放弃整个系统索引阶段，由调用方随后 `break` 出根循环。
+    ///
+    /// 索引器对该请求是“挂住”而不是快速报错，继续逐根重试只会让每个根都白等一个超时；
+    /// 系统索引只是加速，目录遍历随后仍会完整覆盖。
+    fn abandon(&self) {
+        self.coordinator
+            .emit_diagnostic(crate::RootDiscoveryDiagnostic::SystemIndexAbandoned {
+                root: self.root.clone(),
+                ordinal: self.ordinal,
+                waited_ms: crate::duration_millis(self.started.elapsed()),
+            });
+    }
 }
 
 /// Windows 通过进程内 WinRT Search API 分页查询索引中的 JSONL 路径。
@@ -110,9 +113,7 @@ pub(super) fn query(
         }
         let mut trace = RootQueryTrace {
             coordinator,
-            root: root
-                .file_name()
-                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            root: super::root_label(root),
             ordinal: u64::try_from(ordinal).unwrap_or(u64::MAX),
             started: std::time::Instant::now(),
             pages: 0,
@@ -133,7 +134,7 @@ pub(super) fn query(
         ) {
             WaitOutcome::Ready(folder) => folder,
             WaitOutcome::TimedOut => {
-                trip_circuit_breaker(coordinator, &trace);
+                trace.abandon();
                 break 'roots;
             }
             WaitOutcome::Stopped => continue,
@@ -159,7 +160,7 @@ pub(super) fn query(
             ) {
                 WaitOutcome::Ready(files) => files,
                 WaitOutcome::TimedOut => {
-                    trip_circuit_breaker(coordinator, &trace);
+                    trace.abandon();
                     break 'roots;
                 }
                 WaitOutcome::Stopped => break,

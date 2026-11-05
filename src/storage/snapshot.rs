@@ -1,6 +1,6 @@
 //! 在本机索引的单一快照事务中读取 canonical 调用与安全数据根记录。
 
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, TransactionTrait};
 
 use crate::{
     CanonicalUsageSet, LocalIndexState, RootActivationState, ScanCancellation,
@@ -14,10 +14,7 @@ use super::{
     coverage_state_from_label,
 };
 
-/// 为会话快照查询构造带绑定值的 SQLite 语句。
-fn statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
-    Statement::from_sql_and_values(DbBackend::Sqlite, sql, values)
-}
+use crate::storage::sql::statement;
 
 /// 在一个事务中读取调用与根记录，读取完成后只提交事务边界；三次查询共享
 /// 同一数据库快照，避免并发写入让调用记录和数据根信息互相矛盾。

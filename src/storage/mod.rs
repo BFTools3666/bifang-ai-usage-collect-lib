@@ -22,6 +22,7 @@ mod schema;
 mod snapshot;
 mod snapshot_cpu;
 mod snapshot_ops;
+mod sql;
 
 use std::path::{Path, PathBuf};
 

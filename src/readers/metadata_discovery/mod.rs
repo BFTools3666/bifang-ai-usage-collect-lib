@@ -37,6 +37,11 @@ use scope::{
     path_under_unselected_agent_directory, platform_priority_roots,
 };
 
+/// 搜索根的日志展示名：只取目录名末段并经展示名 sanitizer，不含完整路径和控制字符。
+fn root_label(path: &Path) -> String {
+    crate::safe_path_basename(&path.to_string_lossy()).unwrap_or_default()
+}
+
 /// 执行结果只包含非路径计数；候选直接提交到运行时协调器。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataDiscoverySummary {
@@ -144,17 +149,16 @@ pub fn discover_metadata_roots_with_callback(
         }
     };
     let index_started = std::time::Instant::now();
-    let index_names_before = coordinator.snapshot().progress.file_names_checked;
+    let index_names_before = coordinator.pulse().file_names_checked;
     let system_index_available = platform_index::should_query(discovery_kind)
         && platform_index::query(&volumes, coordinator, agents, on_indexed_path);
     coordinator.emit_diagnostic(crate::RootDiscoveryDiagnostic::SystemIndexFinished {
         available: system_index_available,
         paths: coordinator
-            .snapshot()
-            .progress
+            .pulse()
             .file_names_checked
             .saturating_sub(index_names_before),
-        elapsed_ms: u64::try_from(index_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms: crate::duration_millis(index_started.elapsed()),
     });
     if coordinator.is_cancel_requested() {
         coordinator.finish(system_index_available, false);

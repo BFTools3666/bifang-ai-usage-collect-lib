@@ -1,6 +1,6 @@
 //! 调用写入共享 SQL、语句构造与行编解码辅助。
 
-use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, Statement};
+use sea_orm::{ConnectionTrait, DatabaseTransaction};
 
 use crate::{Confidence, SessionTokenSnapshot, SourceProvenance, TokenUsage, UsageCall};
 
@@ -61,19 +61,9 @@ pub(super) const UPSERT_USAGE_CALL_SQL: &str = "INSERT INTO usage_calls
        reasoning_output_available = excluded.reasoning_output_available,
        adapter_consistency_key = excluded.adapter_consistency_key";
 
-/// 使用当前数据库后端和绑定值构造参数化 SQL 语句。
-pub(crate) fn statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
-    Statement::from_sql_and_values(DbBackend::Sqlite, sql, values)
-}
+pub(crate) use crate::storage::sql::statement;
 
-/// 生成 `?start, ?start+1, ..., ?start+count-1` 形式的占位符列表，供批次
-/// 预取查询的动态长度 `IN (...)` 子句使用；调用方必须按同一顺序绑定值。
-pub(super) fn in_placeholders(start: usize, count: usize) -> String {
-    (start..start + count)
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+pub(super) use crate::storage::sql::in_placeholders;
 
 /// 写入一条规范化调用，返回受影响行数（`ON CONFLICT DO NOTHING` 冲突时为 0）。
 pub(super) async fn execute_usage_call(

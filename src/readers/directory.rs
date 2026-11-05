@@ -80,57 +80,6 @@ pub struct DirectoryVisitChunk {
     pub continuation: Option<DirectoryCursor>,
 }
 
-/// 显式整目录兼容入口；产品和包装层应使用分片入口以限制同时持有的文件句柄。
-pub fn visit_directory(
-    directory: PathBuf,
-    root_path: PathBuf,
-    mut remaining_entries: u64,
-    window: &VisitWindow,
-    cancellation: &CancellationToken,
-    mut probe_budget: RolloutProbeBudget,
-) -> Result<DirectoryVisitOutcome, LocalError> {
-    let mut cursor = DirectoryCursor::new(directory);
-    let mut result = DirectoryVisitOutcome {
-        remaining_entries,
-        probe_budget,
-        permission_denied: 0,
-        skipped: 0,
-        warnings: 0,
-        actions: Vec::new(),
-        enumeration_complete: true,
-        cancelled: false,
-        budget_exhausted: false,
-    };
-    loop {
-        let chunk = visit_directory_chunk(
-            cursor,
-            root_path.clone(),
-            remaining_entries,
-            window,
-            cancellation,
-            probe_budget,
-        )?;
-        let outcome = chunk.outcome;
-        remaining_entries = outcome.remaining_entries;
-        probe_budget = outcome.probe_budget;
-        result.remaining_entries = remaining_entries;
-        result.probe_budget = probe_budget;
-        result.permission_denied = result
-            .permission_denied
-            .saturating_add(outcome.permission_denied);
-        result.skipped = result.skipped.saturating_add(outcome.skipped);
-        result.warnings = result.warnings.saturating_add(outcome.warnings);
-        result.actions.extend(outcome.actions);
-        result.enumeration_complete &= outcome.enumeration_complete;
-        result.cancelled |= outcome.cancelled;
-        result.budget_exhausted |= outcome.budget_exhausted;
-        let Some(next) = chunk.continuation else {
-            return Ok(result);
-        };
-        cursor = next;
-    }
-}
-
 /// 读取并预检一个目录；预算与取消在岛内边界检查。
 pub fn visit_directory_chunk(
     mut cursor: DirectoryCursor,

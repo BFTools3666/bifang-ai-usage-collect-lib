@@ -227,6 +227,11 @@ pub enum RootDiscoveryDiagnostic {
     },
 }
 
+/// 把时长换算成毫秒并在 `u64` 上饱和，供全部发现诊断事件和日志共用同一口径。
+pub fn duration_millis(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// 宿主安装的诊断接收端；在发现线程内同步调用，必须快速返回。
 pub type RootDiscoveryDiagnosticSink = Arc<dyn Fn(RootDiscoveryDiagnostic) + Send + Sync>;
 
@@ -242,6 +247,25 @@ impl std::fmt::Debug for DiagnosticSinkSlot {
             .field(&self.0.is_some())
             .finish()
     }
+}
+
+/// 一次加锁读取的轻量脉搏：只含心跳和日志需要的字段，不克隆整份状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootDiscoveryPulse {
+    /// 当前发现运行编号。
+    pub run_id: u64,
+    /// 当前生命周期。
+    pub lifecycle: RootDiscoveryLifecycle,
+    /// 当前阶段使用的平台策略。
+    pub strategy: RootDiscoveryStrategy,
+    /// 已读取目录项列表的目录数。
+    pub directories_checked: u64,
+    /// 已检查的普通文件名数量。
+    pub file_names_checked: u64,
+    /// 当前去重后的候选数。
+    pub candidates_found: u64,
+    /// 是否已请求取消。
+    pub cancel_requested: bool,
 }
 
 /// 线程安全地保存单个客户端当前发现任务和内存候选。
@@ -480,6 +504,21 @@ impl RootDiscoveryCoordinator {
         true
     }
 
+    /// 一次加锁返回心跳与日志所需的轻量脉搏，避免为读几个计数克隆整份状态。
+    pub fn pulse(&self) -> RootDiscoveryPulse {
+        let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let status = &state.status;
+        RootDiscoveryPulse {
+            run_id: status.run_id,
+            lifecycle: status.lifecycle,
+            strategy: status.strategy,
+            directories_checked: status.progress.directories_checked,
+            file_names_checked: status.progress.file_names_checked,
+            candidates_found: state.candidates.len() as u64,
+            cancel_requested: state.cancel_requested,
+        }
+    }
+
     /// 返回是否已经收到取消请求。
     pub fn is_cancel_requested(&self) -> bool {
         self.inner
@@ -579,6 +618,35 @@ mod tests {
         coordinator.add_index_file_names(512);
         coordinator.add_index_file_names(3);
         assert_eq!(coordinator.snapshot().progress.file_names_checked, 515);
+    }
+
+    /// 毫秒换算在 u64 上饱和，且脉搏与快照读到同一份计数。
+    #[test]
+    fn duration_millis_saturates_and_pulse_matches_snapshot() {
+        assert_eq!(
+            duration_millis(std::time::Duration::from_millis(1500)),
+            1500
+        );
+        assert_eq!(duration_millis(std::time::Duration::MAX), u64::MAX);
+        let coordinator = RootDiscoveryCoordinator::default();
+        assert!(coordinator.start(
+            RootDiscoveryStrategy::MetadataTraversal,
+            RootDiscoveryPlatform::Other,
+            RootDiscoveryScope::UserPriority,
+            1
+        ));
+        coordinator.add_index_file_names(7);
+        let pulse = coordinator.pulse();
+        let snapshot = coordinator.snapshot();
+        assert_eq!(pulse.run_id, snapshot.run_id);
+        assert_eq!(pulse.lifecycle, RootDiscoveryLifecycle::Running);
+        assert_eq!(
+            pulse.file_names_checked,
+            snapshot.progress.file_names_checked
+        );
+        assert!(!pulse.cancel_requested);
+        coordinator.request_cancel();
+        assert!(coordinator.pulse().cancel_requested);
     }
 
     /// 诊断事件只交给已安装的接收端；未安装时静默丢弃。

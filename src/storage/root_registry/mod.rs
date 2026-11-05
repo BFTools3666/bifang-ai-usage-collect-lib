@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, TransactionTrait};
 
 use super::path_codec::{decode_path, encode_path};
 use super::{
@@ -21,19 +21,9 @@ use super::{
 };
 use crate::RootActivationState;
 
-/// 为数据根登记读写构造带绑定值的 SQLite 语句。
-pub(super) fn statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
-    Statement::from_sql_and_values(DbBackend::Sqlite, sql, values)
-}
+pub(super) use crate::storage::sql::statement;
 
-/// 生成 `?start, ?start+1, ..., ?start+count-1` 形式的占位符列表，供动态
-/// 长度的 `IN (...)` 子句使用；调用方必须按同一顺序绑定对应数量的实际值。
-pub(super) fn in_placeholders(start: usize, count: usize) -> String {
-    (start..start + count)
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+pub(super) use crate::storage::sql::in_placeholders;
 
 /// 在调用方选择的事务边界内登记或更新一个数据根。
 async fn register_root_fields_on<C: ConnectionTrait + ?Sized>(

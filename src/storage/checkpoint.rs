@@ -6,16 +6,13 @@
 
 use std::collections::HashMap;
 
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, TransactionTrait};
 
 use super::call_store::{from_sql_u64, to_sql_u64};
 use super::{IntoLocalResult, LocalError, LocalIndex, SourceParseCheckpoint, StoredSourceFile};
 use crate::SourceFileObservation;
 
-/// 为检查点读写构造带绑定值的 SQLite 语句。
-fn statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
-    Statement::from_sql_and_values(DbBackend::Sqlite, sql, values)
-}
+use crate::storage::sql::statement;
 
 impl LocalIndex {
     /// 返回一个来源当前生效的安全 checkpoint。

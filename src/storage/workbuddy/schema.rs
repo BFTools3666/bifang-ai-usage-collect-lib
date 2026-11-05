@@ -1,17 +1,14 @@
 //! WorkBuddy 派生库的独立格式，拒绝接管来源库或其它 Agent 的库。
 use super::{WorkbuddyIndex, database_error};
 use crate::{LocalError, LocalErrorKind};
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, TransactionTrait};
 
 /// ASCII AWB1 标识，只用于本产品的 WorkBuddy 派生库。
 const APPLICATION_ID: i64 = 0x4157_4231;
 /// checkpoint 与安全事件格式的首个稳定代次。
 const SCHEMA_VERSION: i64 = 1;
 
-/// 参数化语句只由本模块固定 SQL 产生。
-pub(super) fn statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
-    Statement::from_sql_and_values(DbBackend::Sqlite, sql, values)
-}
+pub(super) use crate::storage::sql::statement;
 
 /// 校验独立格式及列形状；空库初始化先取得 writer 并复核，避免并发首次打开竞争。
 pub(super) async fn ensure_schema(

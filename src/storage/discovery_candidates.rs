@@ -10,8 +10,8 @@ use crate::{
     RootCandidateEvidence, RootDiscoveryStrategy, SourceClientKind, path_key, stable_id,
 };
 use sea_orm::{
-    ConnectionTrait, DatabaseTransaction, DbBackend, QueryResult, SqliteTransactionMode, Statement,
-    TransactionOptions, TransactionTrait,
+    ConnectionTrait, DatabaseTransaction, QueryResult, SqliteTransactionMode, TransactionOptions,
+    TransactionTrait,
 };
 use std::path::{Component, Path};
 
@@ -26,10 +26,7 @@ pub struct ConfirmedRootCandidate {
     pub activation_state: RootActivationState,
 }
 
-/// 构造只带绑定值的候选存储语句。
-fn statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
-    Statement::from_sql_and_values(DbBackend::Sqlite, sql, values)
-}
+use crate::storage::sql::statement;
 
 /// 非法或已发生变化的候选只返回固定安全说明。
 fn invalid() -> LocalError {

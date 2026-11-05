@@ -27,8 +27,8 @@ mod root_discovery; // 元数据优先的数据根发现任务、候选与激活
 pub use root_discovery::{
     RootCandidate, RootCandidateEvidence, RootCandidateSelectionError, RootDiscoveryCoordinator,
     RootDiscoveryDiagnostic, RootDiscoveryDiagnosticSink, RootDiscoveryLifecycle,
-    RootDiscoveryPlatform, RootDiscoveryProgress, RootDiscoveryScope, RootDiscoveryStatus,
-    RootDiscoveryStrategy,
+    RootDiscoveryPlatform, RootDiscoveryProgress, RootDiscoveryPulse, RootDiscoveryScope,
+    RootDiscoveryStatus, RootDiscoveryStrategy, duration_millis,
 };
 mod root_discovery_priority; // 快速发现的平台优先相对目录表
 pub use root_discovery_priority::root_discovery_priority_relative_roots;
