@@ -1,9 +1,8 @@
 //! GLM rollout 根内 `model-io-sess_*.jsonl` 的同步枚举岛。
 
-use std::collections::HashMap;
 use std::fs;
 
-use crate::{SourceFileObservation, source_file_needs_visit};
+use crate::source_file_needs_visit;
 
 use crate::readers::CancellationToken;
 use crate::readers::discovery::metadata_is_link_like;
@@ -36,36 +35,16 @@ pub struct GlmScanCounters {
     pub budget_exhausted: bool,
 }
 
-/// 一个根内按相对路径累积的保留与拒绝来源标签。
-#[derive(Default)]
-pub struct GlmRootSourceLabels {
-    /// 已保留（参与统计）的来源相对标签。
-    pub retained: std::collections::HashSet<String>,
-    /// 被拒绝（不满足布局或安全边界）的来源相对标签。
-    pub rejected: std::collections::HashSet<String>,
-}
+pub use crate::readers::enumerate_common::{EnumerateOutcome, EnumerateWindow, RootSourceLabels};
 
-/// 枚举结果：更新后的计数、标签、完整性与待索引路径。
-pub struct GlmEnumerateOutcome {
-    /// 更新后的累计计数。
-    pub counters: GlmScanCounters,
-    /// 本根累积的来源标签。
-    pub labels: GlmRootSourceLabels,
-    /// 枚举是否完整走完；预算耗尽或取消时为 `false`。
-    pub enumeration_complete: bool,
-    /// 枚举是否被协作取消。
-    pub cancelled: bool,
-    /// 待索引的会话文件路径。
-    pub paths: Vec<std::path::PathBuf>,
-}
+/// ZCode 的来源标签与共用结构同形，保留原有公开名称。
+pub type GlmRootSourceLabels = RootSourceLabels;
 
-/// 枚举一个根所需的窗口下界与上次 checkpoint 观察值。
-pub struct GlmEnumerateWindow {
-    /// 从未索引过的文件只在修改时间不早于该下界时进入解析。
-    pub scan_since_epoch_ms: i64,
-    /// 该根下已索引来源上次记录的大小与修改时间，按相对标签索引。
-    pub known_sources: HashMap<String, SourceFileObservation>,
-}
+/// ZCode 的枚举窗口与共用结构同形，保留原有公开名称。
+pub type GlmEnumerateWindow = EnumerateWindow;
+
+/// ZCode 的枚举结果使用自己的计数类型。
+pub type GlmEnumerateOutcome = EnumerateOutcome<GlmScanCounters>;
 
 /// 在 blocking 岛内枚举一个 GLM rollout 根下全部可索引会话文件。
 ///

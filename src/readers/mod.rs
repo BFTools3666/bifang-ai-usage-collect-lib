@@ -3,6 +3,7 @@ pub mod claude;
 pub mod directory;
 pub mod directory_cursor;
 pub mod discovery;
+pub(crate) mod enumerate_common;
 pub mod file_source;
 pub mod glm;
 pub mod grok;

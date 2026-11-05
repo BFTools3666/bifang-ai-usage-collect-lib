@@ -1,67 +1,24 @@
 //! Claude transcript 结构签名探测与有界预算。
 
+pub use super::super::super::discovery::agent_probe::{
+    Inspection, SignatureBudget, coverage_state, crosses_search_root, is_excluded,
+    reject_link_components,
+};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::{CoverageState, RootCandidateEvidence, SourceClientKind};
+use crate::{RootCandidateEvidence, SourceClientKind};
 use jiff::Timestamp;
 use serde::Deserialize;
 
-use super::super::super::discovery::{metadata_is_link_like, walk_ancestors_for_link_component};
-use super::super::super::{CancellationToken, FullDiscoveryOptions};
+use super::super::super::discovery::metadata_is_link_like;
 use super::super::path_rules::{is_subagent_jsonl_name, is_uuid, is_uuid_jsonl_name};
 
 /// 单条结构签名记录允许的最大字节数，超出即视为拒绝证据。
 const MAX_SIGNATURE_LINE_BYTES: u64 = 1024 * 1024;
 /// 每个 transcript 文件最多尝试读取的记录条数上限。
 const MAX_SIGNATURE_RECORDS_PER_FILE: u64 = 64;
-
-/// 结构签名探测过程中共享的有界预算，防止无限递归遍历目录树。
-pub struct SignatureBudget<'a> {
-    /// 用于中途响应取消请求的令牌。
-    cancellation: &'a CancellationToken,
-    /// 剩余允许遍历的目录数预算。
-    remaining_directories: u64,
-    /// 剩余允许处理的目录项数预算。
-    remaining_entries: u64,
-    /// 剩余允许打开的文件数预算。
-    remaining_files: u64,
-    /// 剩余允许读取的字节数预算。
-    remaining_bytes: u64,
-}
-
-impl<'a> SignatureBudget<'a> {
-    /// 从全设备发现选项初始化各项预算上限。
-    pub fn new(options: &FullDiscoveryOptions, cancellation: &'a CancellationToken) -> Self {
-        Self {
-            cancellation,
-            remaining_directories: options.max_signature_directories,
-            remaining_entries: options.max_signature_entries,
-            remaining_files: options.max_signature_files,
-            remaining_bytes: options.max_signature_bytes,
-        }
-    }
-}
-
-/// 单次结构签名探测的结论。
-// 区分“确认不是”（Rejected/NotRoot）与“无法确认”（Indeterminate/
-// Cancelled/BudgetExhausted）：前者可放心当作否定结论丢弃候选根，后者
-// 必须保留旧登记，不能因权限突变、路径被移动等瞬时问题误删用户数据源。
-pub enum Inspection {
-    /// 确认是 Claude transcript 根目录，并保留命中的结构证据类型。
-    Found(RootCandidateEvidence),
-    /// 确认不是候选根（例如目录不存在）。
-    NotRoot,
-    /// 确认结构不符合 Claude transcript 特征，视同否定结论。
-    Rejected,
-    /// 未能得出确定结论（如临时性 I/O 错误）；调用方须原样保留旧登记。
-    Indeterminate,
-    /// 探测过程中收到取消信号，提前中止。
-    Cancelled,
-    /// 预算耗尽提前中止，尚未得出结论。
-    BudgetExhausted,
-}
 
 /// 结构签名探测只反序列化的最小字段集合，缺失字段一律容忍为 `None`。
 #[derive(Deserialize)]
@@ -395,47 +352,10 @@ fn nonempty(value: Option<&str>) -> bool {
     value.is_some_and(|value| !value.trim().is_empty())
 }
 
-/// 沿路径的每一级祖先检查是否存在链接组件，供候选路径安全性校验复用。
-pub fn reject_link_components(path: &Path) -> std::io::Result<bool> {
-    match walk_ancestors_for_link_component(path) {
-        Ok(has_link) => Ok(has_link),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
 /// 按 core 的 Claude Code 别名规则生成安全展示别名，不在 adapter 内二次编码。
 ///
 /// Claude Desktop 本地 Agent 会话根的专属短标识别名同样由该规则给出，保证快速
 /// 发现、全设备发现与手动添加三条入口对同一路径产生一致展示身份。
 pub fn safe_alias(path: &Path) -> String {
     crate::source_root_alias_from_path(path, SourceClientKind::ClaudeCode)
-}
-
-/// 按取消、预算耗尽与权限/跳过计数折算出本次发现的覆盖状态。
-pub fn coverage_state(
-    cancelled: bool,
-    budget_exhausted: bool,
-    permission_denied_count: u64,
-    skipped_count: u64,
-) -> CoverageState {
-    if cancelled {
-        CoverageState::Cancelled
-    } else if budget_exhausted || permission_denied_count > 0 || skipped_count > 0 {
-        CoverageState::Partial
-    } else {
-        CoverageState::Complete
-    }
-}
-
-/// 判定路径是否落在本次遍历需要排除的固定根集合内。
-pub fn is_excluded(path: &Path, traversal_root: &Path, excluded_roots: &[PathBuf]) -> bool {
-    crate::is_discovery_path_excluded(path, traversal_root, excluded_roots)
-}
-
-/// 判定路径是否越过了另一个独立搜索根，避免同一子树被重复遍历。
-pub fn crosses_search_root(path: &Path, traversal_root: &Path, search_roots: &[PathBuf]) -> bool {
-    search_roots.iter().any(|other| {
-        other != traversal_root && other.starts_with(traversal_root) && path.starts_with(other)
-    })
 }

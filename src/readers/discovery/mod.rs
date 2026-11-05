@@ -1,6 +1,7 @@
 //! Codex 默认、环境、自定义与全设备数据根的只读发现。
 //! 快速发现和全设备发现共用路径、签名、覆盖与匿名身份规则。
 
+pub(crate) mod agent_probe;
 mod full_device;
 mod inspection;
 mod quick;

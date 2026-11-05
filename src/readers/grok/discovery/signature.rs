@@ -1,61 +1,21 @@
 //! Grok home 结构签名探测：只承认 `sessions/**/updates.jsonl`。
 
+pub use super::super::super::discovery::agent_probe::{
+    Inspection, SignatureBudget, coverage_state, crosses_search_root, is_excluded,
+    reject_link_components,
+};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::{CoverageState, RootCandidateEvidence};
+use crate::RootCandidateEvidence;
 use serde::Deserialize;
 
-use super::super::super::discovery::{metadata_is_link_like, walk_ancestors_for_link_component};
-use super::super::super::{CancellationToken, FullDiscoveryOptions};
+use super::super::super::discovery::metadata_is_link_like;
 use super::super::path_rules::is_grok_updates_path;
 
 const MAX_SIGNATURE_LINE_BYTES: u64 = 1024 * 1024;
 const MAX_SIGNATURE_RECORDS_PER_FILE: u64 = 64;
-
-/// 结构签名探测过程中共享的有界预算。
-pub struct SignatureBudget<'a> {
-    /// 协作取消令牌，探测循环中定期检查。
-    cancellation: &'a CancellationToken,
-    /// 剩余允许遍历的目录数。
-    remaining_directories: u64,
-    /// 剩余允许检查的目录项数。
-    remaining_entries: u64,
-    /// 剩余允许打开的文件数。
-    remaining_files: u64,
-    /// 剩余允许读取的字节数。
-    remaining_bytes: u64,
-}
-
-impl<'a> SignatureBudget<'a> {
-    /// 从全设备发现选项初始化各项预算上限。
-    pub fn new(options: &FullDiscoveryOptions, cancellation: &'a CancellationToken) -> Self {
-        Self {
-            cancellation,
-            remaining_directories: options.max_signature_directories,
-            remaining_entries: options.max_signature_entries,
-            remaining_files: options.max_signature_files,
-            remaining_bytes: options.max_signature_bytes,
-        }
-    }
-}
-
-/// 单次结构签名探测的结论。
-pub enum Inspection {
-    /// 确认是 Grok home，并保留命中的结构证据。
-    Found(RootCandidateEvidence),
-    /// 目录不存在。
-    NotRoot,
-    /// 确认结构不符合 Grok 会话特征。
-    Rejected,
-    /// 未能得出确定结论，须保留旧登记。
-    Indeterminate,
-    /// 探测过程中收到取消信号。
-    Cancelled,
-    /// 预算耗尽提前中止。
-    BudgetExhausted,
-}
 
 #[derive(Deserialize)]
 /// 仅反序列化 Grok 更新签名所需的外层事件字段。
@@ -266,15 +226,6 @@ fn signature_usage_payload(record: &SignatureEnvelope) -> &SignatureEnvelope {
         .map_or(record, Box::as_ref)
 }
 
-/// 沿路径祖先检查链接组件。
-pub fn reject_link_components(path: &Path) -> std::io::Result<bool> {
-    match walk_ancestors_for_link_component(path) {
-        Ok(has_link) => Ok(has_link),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
 /// 取路径末段作为安全展示别名。
 pub fn safe_alias(path: &Path) -> String {
     path.file_name()
@@ -282,32 +233,4 @@ pub fn safe_alias(path: &Path) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("Grok 数据根")
         .to_owned()
-}
-
-/// 按取消、预算与跳过计数折算覆盖状态。
-pub fn coverage_state(
-    cancelled: bool,
-    budget_exhausted: bool,
-    permission_denied_count: u64,
-    skipped_count: u64,
-) -> CoverageState {
-    if cancelled {
-        CoverageState::Cancelled
-    } else if budget_exhausted || permission_denied_count > 0 || skipped_count > 0 {
-        CoverageState::Partial
-    } else {
-        CoverageState::Complete
-    }
-}
-
-/// 判定路径是否落在排除根集合内。
-pub fn is_excluded(path: &Path, traversal_root: &Path, excluded_roots: &[PathBuf]) -> bool {
-    crate::is_discovery_path_excluded(path, traversal_root, excluded_roots)
-}
-
-/// 判定路径是否越过了另一个独立搜索根。
-pub fn crosses_search_root(path: &Path, traversal_root: &Path, search_roots: &[PathBuf]) -> bool {
-    search_roots.iter().any(|other| {
-        other != traversal_root && other.starts_with(traversal_root) && path.starts_with(other)
-    })
 }

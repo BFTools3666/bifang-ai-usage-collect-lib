@@ -1,10 +1,9 @@
 //! Claude 根内 transcript 路径的同步枚举岛。
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{SourceFileObservation, source_file_needs_visit};
+use crate::source_file_needs_visit;
 
 use crate::readers::CancellationToken;
 use crate::readers::discovery::metadata_is_link_like;
@@ -14,61 +13,9 @@ use crate::readers::file_source::modified_epoch_ms;
 use super::discovery::ClaudeDiscoveredRoot;
 use super::path_rules::{is_subagent_jsonl_name, is_uuid, is_uuid_jsonl_name};
 
-/// 汇总一次扫描内跨目录、跨文件累积的可变计数与剩余预算。
-#[derive(Default, Clone)]
-pub struct ScanCounters {
-    /// 剩余允许遍历的目录数预算。
-    pub remaining_directories: u64,
-    /// 剩余允许处理的目录项数预算。
-    pub remaining_entries: u64,
-    /// 本次扫描已处理的文件数。
-    pub files_scanned: u64,
-    /// 未发生变化、跳过重新索引的文件数。
-    pub unchanged_files: u64,
-    /// 因截断/替换等原因整份重建的文件数。
-    pub rebuilt_files: u64,
-    /// 本次扫描新增写入的调用条数。
-    pub calls_added: u64,
-    /// 权限拒绝计数。
-    pub permission_denied_count: u64,
-    /// 因链接、非本地卷等原因跳过的计数。
-    pub skipped_count: u64,
-    /// 格式与数据质量告警计数。
-    pub warning_count: u64,
-    /// 标识预算已耗尽，本次枚举未必完整。
-    pub budget_exhausted: bool,
-}
-
-/// 一个根内按相对路径累积的保留与拒绝来源标签。
-#[derive(Default)]
-pub struct RootSourceLabels {
-    /// 已确认应保留索引的来源相对标签集合。
-    pub retained: std::collections::HashSet<String>,
-    /// 已确认应拒绝索引的来源相对标签集合。
-    pub rejected: std::collections::HashSet<String>,
-}
-
-/// 枚举结果：更新后的计数、标签、完整性与待索引路径。
-pub struct EnumerateOutcome {
-    /// 更新后的扫描计数。
-    pub counters: ScanCounters,
-    /// 更新后的保留/拒绝来源标签。
-    pub labels: RootSourceLabels,
-    /// 标识本次枚举已完整覆盖该根，未因预算或错误提前中止。
-    pub enumeration_complete: bool,
-    /// 标识本次枚举因取消信号提前终止。
-    pub cancelled: bool,
-    /// 本次枚举确认的待索引文件路径。
-    pub paths: Vec<PathBuf>,
-}
-
-/// 枚举一个根所需的窗口下界与上次 checkpoint 观察值。
-pub struct EnumerateWindow {
-    /// 从未索引过的文件只在修改时间不早于该下界时进入解析。
-    pub scan_since_epoch_ms: i64,
-    /// 该根下已索引来源上次记录的大小与修改时间，按相对标签索引。
-    pub known_sources: HashMap<String, SourceFileObservation>,
-}
+pub use crate::readers::enumerate_common::{
+    EnumerateOutcome, EnumerateWindow, RootSourceLabels, ScanCounters,
+};
 
 /// 在 blocking 岛内枚举一个 Claude 根下全部可索引 transcript 路径。
 pub fn enumerate_root_transcripts(
