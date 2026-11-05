@@ -143,8 +143,19 @@ pub fn discover_metadata_roots_with_callback(
             );
         }
     };
+    let index_started = std::time::Instant::now();
+    let index_names_before = coordinator.snapshot().progress.file_names_checked;
     let system_index_available = platform_index::should_query(discovery_kind)
         && platform_index::query(&volumes, coordinator, agents, on_indexed_path);
+    coordinator.emit_diagnostic(crate::RootDiscoveryDiagnostic::SystemIndexFinished {
+        available: system_index_available,
+        paths: coordinator
+            .snapshot()
+            .progress
+            .file_names_checked
+            .saturating_sub(index_names_before),
+        elapsed_ms: u64::try_from(index_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    });
     if coordinator.is_cancel_requested() {
         coordinator.finish(system_index_available, false);
         return MetadataDiscoverySummary {

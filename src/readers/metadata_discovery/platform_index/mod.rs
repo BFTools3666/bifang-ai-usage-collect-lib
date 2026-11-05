@@ -29,6 +29,38 @@ pub(super) fn should_query(scope: RootDiscoveryScope) -> bool {
     }
 }
 
+/// 记录一个搜索根的系统索引查询；无论从哪个出口离开，析构时都会发出带耗时的诊断事件。
+#[cfg(target_os = "windows")]
+struct RootQueryTrace<'a> {
+    /// 接收诊断事件的发现协调器。
+    coordinator: &'a RootDiscoveryCoordinator,
+    /// 搜索根目录名末段，不含完整路径。
+    root: String,
+    /// 搜索根序号。
+    ordinal: u64,
+    /// 开始查询的时刻。
+    started: std::time::Instant,
+    /// 已取回的分页数。
+    pages: u64,
+    /// 系统索引返回的文件数。
+    paths: u64,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for RootQueryTrace<'_> {
+    /// 统一出口：超时、取消、错误和正常结束都留下同样的耗时记录。
+    fn drop(&mut self) {
+        self.coordinator
+            .emit_diagnostic(crate::RootDiscoveryDiagnostic::SystemIndexRootFinished {
+                root: std::mem::take(&mut self.root),
+                ordinal: self.ordinal,
+                pages: self.pages,
+                paths: self.paths,
+                elapsed_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            });
+    }
+}
+
 /// Windows 通过进程内 WinRT Search API 分页查询索引中的 JSONL 路径。
 #[cfg(target_os = "windows")]
 pub(super) fn query(
@@ -59,10 +91,20 @@ pub(super) fn query(
         return false;
     }
     let mut any_query_succeeded = false;
-    for root in &volumes.search_roots {
+    for (ordinal, root) in volumes.search_roots.iter().enumerate() {
         if coordinator.is_cancel_requested() {
             break;
         }
+        let mut trace = RootQueryTrace {
+            coordinator,
+            root: root
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            ordinal: u64::try_from(ordinal).unwrap_or(u64::MAX),
+            started: std::time::Instant::now(),
+            pages: 0,
+            paths: 0,
+        };
         let Ok(folder_operation) =
             StorageFolder::GetFolderFromPathAsync(&HSTRING::from(root.to_string_lossy().as_ref()))
         else {
@@ -103,6 +145,10 @@ pub(super) fn query(
             let Ok(size) = files.Size() else {
                 break;
             };
+            trace.pages = trace.pages.saturating_add(1);
+            trace.paths = trace.paths.saturating_add(u64::from(size));
+            // 每取回一页就推进一次计数，使系统索引阶段也有可见的进度变化。
+            coordinator.add_index_file_names(u64::from(size));
             for index in 0..size {
                 if coordinator.is_cancel_requested() {
                     return any_query_succeeded;

@@ -173,11 +173,75 @@ impl Default for RootDiscoveryStatus {
     }
 }
 
+/// 发现过程中的阶段性诊断事件；只含阶段、目录名末段与计数，绝不携带完整路径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootDiscoveryDiagnostic {
+    /// 系统索引对一个搜索根的查询结束（成功、超时、取消或失败都会发出）。
+    SystemIndexRootFinished {
+        /// 搜索根的目录名末段。
+        root: String,
+        /// 搜索根在本次任务中的序号，从 0 开始。
+        ordinal: u64,
+        /// 已完成取回的分页数。
+        pages: u64,
+        /// 系统索引返回的文件数。
+        paths: u64,
+        /// 本根查询耗时毫秒。
+        elapsed_ms: u64,
+    },
+    /// 整个系统索引阶段结束。
+    SystemIndexFinished {
+        /// 至少一次查询成功。
+        available: bool,
+        /// 系统索引返回的文件总数。
+        paths: u64,
+        /// 阶段耗时毫秒。
+        elapsed_ms: u64,
+    },
+    /// 普通遍历阶段一个搜索根遍历完成。
+    TraversalRootFinished {
+        /// 搜索根的目录名末段。
+        root: String,
+        /// 搜索根在本次任务中的序号，从 0 开始。
+        ordinal: u64,
+        /// 该根下已读取的目录数。
+        directories: u64,
+        /// 该根下已检查的文件名数。
+        file_names: u64,
+        /// 本根遍历耗时毫秒。
+        elapsed_ms: u64,
+    },
+    /// 整个普通遍历阶段结束（含被取消）。
+    TraversalFinished {
+        /// 阶段耗时毫秒。
+        elapsed_ms: u64,
+    },
+}
+
+/// 宿主安装的诊断接收端；在发现线程内同步调用，必须快速返回。
+pub type RootDiscoveryDiagnosticSink = Arc<dyn Fn(RootDiscoveryDiagnostic) + Send + Sync>;
+
+/// 包装诊断接收端，使协调器仍可派生 `Debug`。
+#[derive(Clone, Default)]
+struct DiagnosticSinkSlot(Option<RootDiscoveryDiagnosticSink>);
+
+impl std::fmt::Debug for DiagnosticSinkSlot {
+    /// 只表明是否已安装，不尝试格式化闭包。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("DiagnosticSinkSlot")
+            .field(&self.0.is_some())
+            .finish()
+    }
+}
+
 /// 线程安全地保存单个客户端当前发现任务和内存候选。
 #[derive(Debug, Clone, Default)]
 pub struct RootDiscoveryCoordinator {
     /// 受互斥锁保护的发现状态，供后台任务与界面轮询共享。
     inner: Arc<Mutex<RootDiscoveryState>>,
+    /// 宿主可选安装的诊断接收端；与状态分锁，避免回调持有状态锁。
+    diagnostics: Arc<Mutex<DiagnosticSinkSlot>>,
 }
 
 #[derive(Debug, Default)]
@@ -358,6 +422,37 @@ impl RootDiscoveryCoordinator {
         state.status.progress.candidates_found = state.candidates.len() as u64;
     }
 
+    /// 安装诊断接收端；之后发现线程发出的阶段事件都会同步交给它。
+    pub fn set_diagnostic_sink(&self, sink: RootDiscoveryDiagnosticSink) {
+        *self
+            .diagnostics
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = DiagnosticSinkSlot(Some(sink));
+    }
+
+    /// 发出诊断事件；未安装接收端时无操作。回调在锁外执行。
+    pub fn emit_diagnostic(&self, event: RootDiscoveryDiagnostic) {
+        let sink = self
+            .diagnostics
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .0
+            .clone();
+        if let Some(sink) = sink {
+            sink(event);
+        }
+    }
+
+    /// 系统索引分页返回结果时累加已检查文件名数，让界面在遍历开始前就有计数变化。
+    pub fn add_index_file_names(&self, count: u64) {
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if state.status.lifecycle != RootDiscoveryLifecycle::Running {
+            return;
+        }
+        let progress = &mut state.status.progress;
+        progress.file_names_checked = progress.file_names_checked.saturating_add(count);
+    }
+
     /// 切换到普通遍历阶段并记录平台索引可用性。
     pub fn begin_fallback(&self, system_index_available: bool) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
@@ -459,6 +554,40 @@ impl RootDiscoveryCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 系统索引阶段的分页计数立即体现在进度里，且只在 Running 时累加。
+    #[test]
+    fn index_file_names_advance_progress_only_while_running() {
+        let coordinator = RootDiscoveryCoordinator::default();
+        coordinator.add_index_file_names(5);
+        assert_eq!(coordinator.snapshot().progress.file_names_checked, 0);
+        assert!(coordinator.start(
+            RootDiscoveryStrategy::WindowsSearch,
+            RootDiscoveryPlatform::Windows,
+            RootDiscoveryScope::UserPriority,
+            1
+        ));
+        coordinator.add_index_file_names(512);
+        coordinator.add_index_file_names(3);
+        assert_eq!(coordinator.snapshot().progress.file_names_checked, 515);
+    }
+
+    /// 诊断事件只交给已安装的接收端；未安装时静默丢弃。
+    #[test]
+    fn diagnostics_reach_only_an_installed_sink() {
+        let coordinator = RootDiscoveryCoordinator::default();
+        coordinator.emit_diagnostic(RootDiscoveryDiagnostic::TraversalFinished { elapsed_ms: 1 });
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        coordinator.set_diagnostic_sink(Arc::new(move |event| {
+            sink_seen.lock().expect("seen lock").push(event);
+        }));
+        coordinator.emit_diagnostic(RootDiscoveryDiagnostic::TraversalFinished { elapsed_ms: 2 });
+        assert_eq!(
+            *seen.lock().expect("seen lock"),
+            vec![RootDiscoveryDiagnostic::TraversalFinished { elapsed_ms: 2 }]
+        );
+    }
 
     /// 验证权限缺口保留计数，并把终态保守降级为部分完成。
     #[test]

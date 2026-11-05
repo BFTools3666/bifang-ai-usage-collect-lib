@@ -52,6 +52,17 @@ pub(super) struct DirectoryResult {
     skipped: u64,
 }
 
+/// 单个搜索根的遍历统计，仅用于诊断事件。
+#[derive(Debug)]
+struct RootTraversalStats {
+    /// 该根下已读取的目录数。
+    directories: u64,
+    /// 该根下已检查的文件名数。
+    file_names: u64,
+    /// 是否已发出完成事件。
+    reported: bool,
+}
+
 /// 覆盖整次发现生命周期的固定目录 worker 池，避免每轮反复创建原生线程。
 pub(super) struct MetadataWorkerPool {
     /// 任务发送端；关闭后 worker 退出。
@@ -179,6 +190,15 @@ pub(super) fn discover_metadata_roots_in_with_callback(
         })
         .collect::<HashSet<_>>();
     let mut next_volume = 0_usize;
+    let traversal_started = std::time::Instant::now();
+    let mut stats = queues
+        .iter()
+        .map(|_| RootTraversalStats {
+            directories: 0,
+            file_names: 0,
+            reported: false,
+        })
+        .collect::<Vec<_>>();
     let worker_pool = MetadataWorkerPool::new(adaptive_worker_count(), agents, coordinator.clone());
 
     while queues.iter().any(|queue| !queue.completed) {
@@ -188,6 +208,7 @@ pub(super) fn discover_metadata_roots_in_with_callback(
         let jobs = take_fair_jobs(&mut queues, adaptive_worker_count(), &mut next_volume);
         if jobs.is_empty() {
             mark_completed_queues(&mut queues, &mut progress);
+            report_completed_roots(coordinator, &queues, &mut stats, traversal_started);
             continue;
         }
         let results = worker_pool.inspect(jobs);
@@ -199,6 +220,12 @@ pub(super) fn discover_metadata_roots_in_with_callback(
                 progress.io_errors = progress.io_errors.saturating_add(1);
                 continue;
             };
+            stats[volume].directories = stats[volume]
+                .directories
+                .saturating_add(u64::from(result.started_now));
+            stats[volume].file_names = stats[volume]
+                .file_names
+                .saturating_add(result.file_names_checked);
             progress.directories_checked = progress
                 .directories_checked
                 .saturating_add(u64::from(result.started_now));
@@ -243,9 +270,13 @@ pub(super) fn discover_metadata_roots_in_with_callback(
             }
         }
         mark_completed_queues(&mut queues, &mut progress);
+        report_completed_roots(coordinator, &queues, &mut stats, traversal_started);
         coordinator.update_progress(progress);
     }
     coordinator.update_progress(progress);
+    coordinator.emit_diagnostic(crate::RootDiscoveryDiagnostic::TraversalFinished {
+        elapsed_ms: u64::try_from(traversal_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    });
     coordinator.finish(false, true);
     MetadataDiscoverySummary {
         system_index_available: false,
@@ -309,6 +340,32 @@ fn mark_completed_queues(queues: &mut [VolumeQueue], progress: &mut RootDiscover
             queue.completed = true;
             progress.volumes_completed = progress.volumes_completed.saturating_add(1);
         }
+    }
+}
+
+/// 为刚刚遍历完的搜索根各发出一次诊断事件；耗时从遍历阶段开始计，因为各根交错执行。
+fn report_completed_roots(
+    coordinator: &RootDiscoveryCoordinator,
+    queues: &[VolumeQueue],
+    stats: &mut [RootTraversalStats],
+    traversal_started: std::time::Instant,
+) {
+    for (ordinal, (queue, stat)) in queues.iter().zip(stats.iter_mut()).enumerate() {
+        if !queue.completed || stat.reported {
+            continue;
+        }
+        stat.reported = true;
+        coordinator.emit_diagnostic(crate::RootDiscoveryDiagnostic::TraversalRootFinished {
+            root: queue
+                .traversal_root
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            ordinal: u64::try_from(ordinal).unwrap_or(u64::MAX),
+            directories: stat.directories,
+            file_names: stat.file_names,
+            elapsed_ms: u64::try_from(traversal_started.elapsed().as_millis())
+                .unwrap_or(u64::MAX),
+        });
     }
 }
 

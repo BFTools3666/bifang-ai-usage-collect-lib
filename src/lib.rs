@@ -26,8 +26,9 @@ pub use provider::{
 mod root_discovery; // 元数据优先的数据根发现任务、候选与激活状态
 pub use root_discovery::{
     RootCandidate, RootCandidateEvidence, RootCandidateSelectionError, RootDiscoveryCoordinator,
-    RootDiscoveryLifecycle, RootDiscoveryPlatform, RootDiscoveryProgress, RootDiscoveryScope,
-    RootDiscoveryStatus, RootDiscoveryStrategy,
+    RootDiscoveryDiagnostic, RootDiscoveryDiagnosticSink, RootDiscoveryLifecycle,
+    RootDiscoveryPlatform, RootDiscoveryProgress, RootDiscoveryScope, RootDiscoveryStatus,
+    RootDiscoveryStrategy,
 };
 mod root_discovery_priority; // 快速发现的平台优先相对目录表
 pub use root_discovery_priority::root_discovery_priority_relative_roots;
