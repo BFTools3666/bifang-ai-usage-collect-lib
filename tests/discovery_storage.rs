@@ -400,3 +400,84 @@ async fn direct_manual_registration_atomically_consumes_saved_position() {
     );
     assert_eq!(index.all_roots().await.expect("confirmed root").len(), 1);
 }
+
+/// 本应用早先版本（版本号更旧）创建的统计库被删除后按当前格式重建，旧数据不保留；
+/// 重建后的库带有按根查询索引。
+#[tokio::test]
+async fn older_own_database_is_removed_and_rebuilt() {
+    let base = tempfile::tempdir().expect("database base");
+    let client = SourceClientKind::Codex;
+    let mut index = LocalIndex::open(base.path(), Path::new("codex.db"), client)
+        .await
+        .expect("new agent database");
+    index
+        .save_discovery_candidate(&candidate(base.path(), client))
+        .await
+        .expect("old data exists");
+    index
+        .test_connection()
+        .execute_unprepared("DROP INDEX source_files_root_idx; PRAGMA user_version = 1;")
+        .await
+        .expect("simulate a database created by the previous format version");
+    drop(index);
+
+    let rebuilt = LocalIndex::open(base.path(), Path::new("codex.db"), client)
+        .await
+        .expect("older own database is rebuilt instead of rejected");
+    let backups = std::fs::read_dir(base.path())
+        .expect("database directory lists")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("codex.db.v1-") && name.ends_with(".zip"))
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1, "old database is zipped beside itself");
+    let archive_file =
+        std::fs::File::open(base.path().join(&backups[0])).expect("backup archive opens");
+    let mut archive = zip::ZipArchive::new(archive_file).expect("backup is a valid zip");
+    let entry = archive
+        .by_name("codex.db")
+        .expect("main database is archived");
+    assert!(entry.size() > 0, "archived database is not empty");
+    assert!(
+        rebuilt
+            .discovery_candidates()
+            .await
+            .expect("candidates readable")
+            .is_empty(),
+        "old data is intentionally not preserved"
+    );
+    let has_index = rebuilt
+        .test_connection()
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'source_files_root_idx'",
+        ))
+        .await
+        .expect("index lookup")
+        .is_some();
+    assert!(has_index);
+}
+
+/// 别人的 SQLite 文件（应用标识不同）绝不会被当作旧库删除。
+#[tokio::test]
+async fn foreign_database_is_never_removed() {
+    let base = tempfile::tempdir().expect("database base");
+    let path = base.path().join("codex.db");
+    let foreign = sea_orm::Database::connect(format!("sqlite://{}?mode=rwc", path.display()))
+        .await
+        .expect("foreign database");
+    sea_orm::ConnectionTrait::execute_unprepared(
+        &foreign,
+        "PRAGMA application_id = 12345; PRAGMA user_version = 1; CREATE TABLE keep(v TEXT); INSERT INTO keep VALUES('mine');",
+    )
+    .await
+    .expect("foreign fixture");
+    foreign.close().await.expect("close foreign");
+    let original = std::fs::read(&path).expect("foreign bytes");
+
+    let error = LocalIndex::open(base.path(), Path::new("codex.db"), SourceClientKind::Codex)
+        .await
+        .expect_err("foreign database is rejected");
+    assert_eq!(error.kind(), LocalErrorKind::UnsupportedSchema);
+    assert_eq!(std::fs::read(&path).expect("still there"), original);
+}

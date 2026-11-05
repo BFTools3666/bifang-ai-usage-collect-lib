@@ -209,16 +209,120 @@ async fn open_database(
         .await
         .map_err(map_private_sqlite_error)?;
 
-    if let Err(error) = schema::ensure_schema(&connection, client).await {
-        let _ = connection.close().await;
-        return Err(error);
-    }
+    let connection = match schema::ensure_schema(&connection, client).await {
+        Ok(()) => connection,
+        Err(error) if error.kind() == LocalErrorKind::UnsupportedSchema => {
+            let stale_version = schema::stale_own_version(&connection).await.ok().flatten();
+            let _ = connection.close().await;
+            let Some(stale_version) = stale_version else {
+                return Err(error);
+            };
+            // 本应用早先版本创建的派生库：先打包备份，成功后才删除并按当前格式重建，
+            // 下一次扫描重新索引；备份或删除任一步失败都保留原库并报告原错误。
+            if retire_stale_database(&database_path, stale_version)
+                .await
+                .is_err()
+            {
+                return Err(error);
+            }
+            let (fresh, _) = open_private_sqlite(app_data_dir, relative_path)
+                .await
+                .map_err(map_private_sqlite_error)?;
+            if let Err(error) = schema::ensure_schema(&fresh, client).await {
+                let _ = fresh.close().await;
+                return Err(error);
+            }
+            fresh
+        }
+        Err(error) => {
+            let _ = connection.close().await;
+            return Err(error);
+        }
+    };
     private_sqlite::set_private_database_permissions(&database_path)
         .await
         .map_err(map_private_sqlite_error)?;
     enable_concurrent_snapshot_reads(&connection).await?;
 
     Ok((connection, database_path))
+}
+
+/// 把旧库及其 WAL/共享内存旁文件打成 zip 放在原目录，返回备份文件路径。
+///
+/// 备份名带旧版本号和时间戳且以“新建”方式写入，绝不覆盖已有文件；旁文件不存在时跳过。
+async fn backup_stale_database(
+    database_path: &Path,
+    stale_version: i64,
+) -> Result<PathBuf, std::io::Error> {
+    let database_path = database_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let name = database_path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| std::io::Error::other("database file name is not valid UTF-8"))?
+            .to_owned();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        let backup = database_path.with_file_name(format!("{name}.v{stale_version}-{stamp}.zip"));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)?;
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for suffix in ["", "-wal", "-shm"] {
+            let entry = format!("{name}{suffix}");
+            let source = database_path.with_file_name(&entry);
+            let mut input = match std::fs::File::open(&source) {
+                Ok(input) => input,
+                Err(error) if suffix.is_empty() => return Err(error),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            archive
+                .start_file(entry, options)
+                .map_err(std::io::Error::other)?;
+            std::io::copy(&mut input, &mut archive)?;
+        }
+        archive.finish().map_err(std::io::Error::other)?;
+        Ok(backup)
+    })
+    .await
+    .map_err(|_| std::io::Error::other("database backup task failed"))?
+}
+
+/// 备份并删除本应用早先版本的统计库及其旁文件；备份失败时原库保持不动。
+async fn retire_stale_database(
+    database_path: &Path,
+    stale_version: i64,
+) -> Result<(), std::io::Error> {
+    let backup = backup_stale_database(database_path, stale_version).await?;
+    private_sqlite::set_private_database_permissions(&backup)
+        .await
+        .map_err(|_| std::io::Error::other("backup permissions could not be restricted"))?;
+    tracing::warn!(
+        kind = "statistics_database_rebuilt",
+        stale_version,
+        current_version = schema::SCHEMA_VERSION,
+        backup = backup
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or(""),
+        "an older statistics database was backed up beside itself and removed; the next scan rebuilds it"
+    );
+    tokio::fs::remove_file(database_path).await?;
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = database_path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        match tokio::fs::remove_file(&sidecar).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// 让长时间扫描提交不阻塞新概览读取；模式持久保存在本机索引数据库中。
