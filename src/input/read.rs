@@ -1,4 +1,4 @@
-//! 无产品上下文的单文件获取入口，便于普通应用和安全的 FFI 包装层使用。
+//! 提供独立于产品上下文的单文件获取入口。
 
 use super::{
     OpenedUsageFile, SourceFileRequest, open_claude_source, open_glm_source, open_grok_source,
@@ -61,7 +61,7 @@ impl Default for UsageReadOptions {
     }
 }
 
-/// 单文件获取报告的 JSON schema 版本，由包装层与客户端显式识别。
+/// 单文件获取报告的 JSON schema 版本，供消费方识别。
 pub const USAGE_READ_REPORT_SCHEMA_VERSION: u16 = 1;
 
 /// 可序列化的读取报告；不携带绝对路径、原始项目种子或数据库状态。

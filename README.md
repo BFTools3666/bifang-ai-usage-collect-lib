@@ -128,17 +128,13 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 
 发现接口接受显式目录输入，也提供当前平台环境的便利构造，保留本地卷、链接、签名与取消边界。原生路径和项目种子仅供本机身份派生，不应发往界面、网络或日志。解析过程只输出用量和安全元数据，不交付提示词、回答或工具正文。WorkBuddy 保留自身的记录模型和固定来源布局，不为统一接口强行转换为有损的 JSONL 调用模型；面板周期、小时趋势和来源联合规则由产品 core 实现。
 
-`readers::glm::discovery::discover_glm_quick` 与 `discover_glm_full_device_with_progress` 保留 CLI rollout 发现语义。能够读取桌面专用用量库的 GUI 显式使用 `discover_zcode_quick` 与 `discover_zcode_full_device_with_progress`，同安装优先桌面库；GUI 优先发现中的显式环境根也使用该策略。FFI/Node 的既有 JSONL 根扫描不会因桌面库存在而改变来源。
-
-## FFI 与 Node 接入
-
-独立项目 `ai_usage_collect_scan_ffi` 提供版本化 C ABI，`ai_usage_collect_scan_node` 通过自己的 Node-API 桥接调用它。本扫描库使用安全 Rust 提供只读获取、通用统计及可选统计存储，不包含面板或外语运行时。接口文档分别位于两个包装项目自己的 `docs/`，见 [C ABI](../ai_usage_collect_scan_ffi/docs/API.md) 和 [Node](../ai_usage_collect_scan_node/docs/API.md)。Rust Trait、`Vec`、`String` 和对象内存布局不作为外语 ABI。
+`readers::glm::discovery::discover_glm_quick` 与 `discover_glm_full_device_with_progress` 保留 CLI rollout 发现语义。能够读取桌面专用用量库的 GUI 显式使用 `discover_zcode_quick` 与 `discover_zcode_full_device_with_progress`，同安装优先桌面库；GUI 优先发现中的显式环境根也使用该策略。显式调用 CLI rollout 发现接口时，桌面库的存在不会改变所选来源。
 
 ## Rust API 版本变化
 
 0.2 将面板视图、保留天数和默认查询留在产品 core，第三方消费者使用通用聚合/分组函数。0.3 新增可选统计存储，共享索引四态、来源登记、checkpoint 值对象和包含数据库类别的统一 `LocalError`；产品 core 重用同一类型。
 
-0.3 将 `RootCandidate.absolute_path` 从 `String` 改为原生 `PathBuf`，消费方需同步构造和访问代码；其 `Debug` 不再输出访问路径。原始解析代次保持不变，统计数据库采用新格式，不兼容旧库。C ABI 和 Node 的请求/结果字段及版本化 wire 合同保持不变，包装项目仍独立维护版本。
+0.3 将 `RootCandidate.absolute_path` 从 `String` 改为原生 `PathBuf`，消费方需同步构造和访问代码；其 `Debug` 不再输出访问路径。原始解析代次保持不变，统计数据库采用新格式，不兼容旧库。
 
 公开 `canonical_calls`、`usage_snapshot`、`usage_snapshot_since`、`index_state` 和普通聚合只读取已发布状态；调用与累计快照、索引存在性与状态计数分别在同一只读事务中取得。同一 `LocalIndex` 正持有未发布扫描事务时，这些入口立即返回 `LocalErrorKind::ScanBusy`，不等待自己占用的唯一连接。扫描内部策略继续使用 `has_current_parser_usage`，扫描摘要使用 `aggregate_active_scan_for_provider` 读取本事务暂存事实。需要并发读取上次发布结果时，另开同一数据库的 `LocalIndex` 即可。
 
@@ -162,4 +158,4 @@ ZCode（Z Code CLI）使用 `JsonlFormat::Glm`，只接受获授权 rollout 根�
 
 ### WorkBuddy 增量派生库
 
-既有 `storage` feature 提供 `storage::WorkbuddyIndex::open(base_dir, relative_path)`；GUI 使用本产品 app-data 的 `workbuddy.db`。`refresh(sources, cutoff, WorkbuddyRefreshMode::Incremental, cancellation)` 只续读变化文件，`Rebuild` 用于用户重新索引；`load_inputs_with_cancellation` 返回同一份已发布的 `WorkbuddyUsageInputs`，不触碰原始 JSONL，`prune_before` 仅清理过期派生事件。两固定根原子发布，积分与顶层/subagent 信息保留，未知/其它 Agent 数据库拒绝接管。原始 `readWorkbuddy`/`read_workbuddy_usage_inputs` API 仍可供明确选择无持久层的消费方使用；GUI 不把它作为读库失败的回退。C ABI/Node 当前存储包装不因此新增 WorkBuddy index wire 操作。
+既有 `storage` feature 提供 `storage::WorkbuddyIndex::open(base_dir, relative_path)`；GUI 使用本产品 app-data 的 `workbuddy.db`。`refresh(sources, cutoff, WorkbuddyRefreshMode::Incremental, cancellation)` 只续读变化文件，`Rebuild` 用于用户重新索引；`load_inputs_with_cancellation` 返回同一份已发布的 `WorkbuddyUsageInputs`，不触碰原始 JSONL，`prune_before` 仅清理过期派生事件。两固定根原子发布，积分与顶层/subagent 信息保留，未知/其它 Agent 数据库拒绝接管。原始 `read_workbuddy_usage_inputs` API 仍可供明确选择无持久层的消费方使用；GUI 不把它作为读库失败的回退。

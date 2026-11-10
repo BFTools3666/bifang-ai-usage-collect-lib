@@ -78,7 +78,7 @@ pub struct ParsedUsage<C, R> {
     pub report: R,
 }
 
-/// 逐调用输出接口，消费方可以收集、写入自己的存储或转发到 FFI 包装层。
+/// 逐调用输出接口，消费方可以收集或写入自己的存储。
 pub type UsageEmitter<'a> = dyn FnMut(UsageCall) -> Result<(), LocalError> + 'a;
 
 /// 可由其他应用实现的同步解析器，不拥有数据库、运行时、线程或产品配置。

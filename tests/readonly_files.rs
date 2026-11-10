@@ -89,7 +89,7 @@ fn common_file_facade_preserves_usage_snapshots_and_wire_contract() {
                 "compatibility snapshots must remain observable"
             );
         }
-        let bytes = serde_json::to_vec(&(calls, report)).expect("FFI wrapper can own UTF-8 bytes");
+        let bytes = serde_json::to_vec(&(calls, report)).expect("usage records and reports serialize to UTF-8");
         let wire: serde_json::Value =
             serde_json::from_slice(&bytes).expect("wire consumer parses owned data");
         assert_eq!(wire[1]["schemaVersion"], 1);
