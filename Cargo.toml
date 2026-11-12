@@ -1,6 +1,6 @@
 [package]
 name = "ai_usage_collect_scan"
-version = "0.3.1"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 authors = ["ManonLoki"]
