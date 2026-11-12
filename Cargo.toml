@@ -9,6 +9,9 @@ license-file = "LICENSE.zh-CN.md"
 readme = "README.md"
 publish = false
 
+# 自成工作区：依赖全部在本清单声明，不继承上级目录的 workspace。
+[workspace]
+
 [features]
 default = []
 test-util = []
