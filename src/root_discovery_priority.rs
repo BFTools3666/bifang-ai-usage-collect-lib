@@ -9,10 +9,7 @@ type PriorityEntry = (&'static str, Option<SourceClientKind>);
 
 /// Windows 用户根下的优先目录，顺序即入队顺序。
 const WINDOWS_PRIORITY_ROOTS: &[PriorityEntry] = &[
-    (
-        "AppData/Roaming/AIManagerData",
-        Some(SourceClientKind::Codex),
-    ),
+    ("AppData/Roaming/AIManagerData", None),
     (".claude", Some(SourceClientKind::ClaudeCode)),
     (".codex", Some(SourceClientKind::Codex)),
     ("AppData/Roaming", None),
@@ -24,10 +21,7 @@ const WINDOWS_PRIORITY_ROOTS: &[PriorityEntry] = &[
 /// 不登记整个 `~/Library`：其下 Developer、Caches、Containers、iCloud 等子树常达
 /// 数十万目录却不存放已知会话数据，快速扫描遍历它会持续数分钟，初始化看似卡住。
 const MACOS_PRIORITY_ROOTS: &[PriorityEntry] = &[
-    (
-        "Library/Application Support/AIManagerData",
-        Some(SourceClientKind::Codex),
-    ),
+    ("Library/Application Support/AIManagerData", None),
     (".claude", Some(SourceClientKind::ClaudeCode)),
     (".codex", Some(SourceClientKind::Codex)),
     ("Library/Application Support", None),
@@ -102,7 +96,7 @@ mod tests {
         assert!(root_discovery_priority_relative_roots("freebsd", all).is_empty());
     }
 
-    /// 单选 Claude 保留共享目录但排除 Codex 专用根；单选 Grok 在任何平台都不触盘。
+    /// 单选 Claude 保留共享目录（含 AIManagerData 托管实例）但排除 Codex 专用根；单选 Grok 在任何平台都不触盘。
     #[test]
     fn selected_agents_exclude_unselected_dedicated_roots() {
         for os in ["windows", "macos", "linux"] {
@@ -110,8 +104,9 @@ mod tests {
                 root_discovery_priority_relative_roots(os, only(SourceClientKind::ClaudeCode));
             assert!(claude.contains(&".claude"), "{os}");
             assert!(!claude.contains(&".codex"), "{os}");
-            assert!(
-                !claude.iter().any(|path| path.ends_with("AIManagerData")),
+            assert_eq!(
+                claude.iter().any(|path| path.ends_with("AIManagerData")),
+                os != "linux",
                 "{os}"
             );
             assert!(
@@ -122,7 +117,12 @@ mod tests {
         }
         assert_eq!(
             root_discovery_priority_relative_roots("windows", only(SourceClientKind::ClaudeCode)),
-            [".claude", "AppData/Roaming", "AppData/Local"]
+            [
+                "AppData/Roaming/AIManagerData",
+                ".claude",
+                "AppData/Roaming",
+                "AppData/Local"
+            ]
         );
     }
 }

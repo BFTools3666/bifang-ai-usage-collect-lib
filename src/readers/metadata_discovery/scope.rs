@@ -127,13 +127,18 @@ pub(super) fn is_unselected_agent_directory(path: &Path, agents: RootDiscoveryAg
     // `projects/<project>/<uuid>.jsonl` 会命中下面的 Claude transcript 规则，
     // 漏掉任一根都会把该根误登记成 Claude Code 数据根。根名只取 core 的单点事实，
     // adapter 不得二次编码，否则新增版本根时会再次静默漏掉。
+    // AIManagerData 同时托管 Codex 与 Claude Code 实例，任一已选择都必须进入。
+    if name == "aimanagerdata" {
+        return !agents.contains(SourceClientKind::Codex)
+            && !agents.contains(SourceClientKind::ClaudeCode);
+    }
     let client = if name.eq_ignore_ascii_case(WORKBUDDY_HOME_DIR_NAME)
         || name.eq_ignore_ascii_case(WORKBUDDY_INTERNATIONAL_HOME_DIR_NAME)
     {
         SourceClientKind::WorkBuddy
     } else {
         match name.as_str() {
-            ".codex" | "aimanagerdata" => SourceClientKind::Codex,
+            ".codex" => SourceClientKind::Codex,
             ".claude" => SourceClientKind::ClaudeCode,
             ".grok" => SourceClientKind::GrokBuildCli,
             ".zcode" => SourceClientKind::Glm,
@@ -308,7 +313,7 @@ mod tests {
         assert_eq!(platform_default_roots(home, agents), expected);
     }
 
-    /// 单选 Claude 不把 Codex 专用根加入触盘种子，单选 Grok 只走显式直达根。
+    /// 单选 Claude 不把 Codex 专用根加入触盘种子（共享的 AIManagerData 除外），单选 Grok 只走显式直达根。
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     #[test]
     fn selected_priority_roots_exclude_unselected_agent_directories() {
@@ -327,10 +332,12 @@ mod tests {
         let roots = platform_default_roots(profile.clone(), claude);
         assert!(roots.contains(&profile.join(".claude")));
         assert!(!roots.contains(&profile.join(".codex")));
-        assert!(
-            roots.iter().all(
-                |path| path.file_name().and_then(|name| name.to_str()) != Some("AIManagerData")
-            )
+        // AIManagerData 同时托管 Claude 实例，单选 Claude 也必须保留（Linux 无该目录）。
+        assert_eq!(
+            roots.iter().any(
+                |path| path.file_name().and_then(|name| name.to_str()) == Some("AIManagerData")
+            ),
+            !cfg!(target_os = "linux")
         );
 
         let grok = resolve_root_discovery_agent_scope(
@@ -339,6 +346,24 @@ mod tests {
         )
         .expect("Grok is a physical discovery agent");
         assert!(platform_default_roots(profile, grok).is_empty());
+    }
+
+    /// AIManagerData 托管 Claude 实例：单选 Claude 的全盘发现不得跳过它，并能推导出实例根。
+    #[test]
+    fn aimanagerdata_stays_reachable_for_claude_only_discovery() {
+        let claude_only = resolve_root_discovery_agent_scope(
+            RootDiscoveryScope::FullLocalVolumes,
+            Some(&[SourceClientKind::ClaudeCode]),
+        )
+        .expect("Claude is a physical discovery agent");
+        let instance = Path::new("/synthetic/Library/Application Support/AIManagerData")
+            .join("claude/instances/claude_a1");
+        let leaf = instance.join("projects/project-a/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0.jsonl");
+        assert!(!path_under_unselected_agent_directory(&leaf, claude_only));
+        let (root, evidence) =
+            candidate_from_file_name(&leaf, claude_only).expect("instance root is a candidate");
+        assert_eq!(root, instance);
+        assert_eq!(evidence, RootCandidateEvidence::ClaudeTranscript);
     }
 
     /// 国内版与国际版两个固定 WorkBuddy 根都不属于物理发现客户端，必须在发现层被跳过。
