@@ -314,6 +314,11 @@ fn parse_line(
                     | "atis-latch"
                     | "bridge-session"
                     | "cost-state"
+                    | "ai-title"
+                    | "api-request"
+                    | "api-request-blob"
+                    | "api-request-shape"
+                    | "tools-used"
             )
         ) {
             LineOutcome::Ignored

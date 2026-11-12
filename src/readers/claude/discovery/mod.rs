@@ -26,7 +26,7 @@ use super::super::{
     CancellationToken, DiscoveryMethod, FullDiscoveryOptions, LocalPathStatus, RegisteredRoot,
     classify_local_path, is_obviously_network_path,
 };
-use desktop_agent::claude_desktop_agent_homes;
+use desktop_agent::{claude_desktop_agent_homes, claude_managed_instance_homes};
 use signature::{
     Inspection, SignatureBudget, coverage_state, inspect_root, reject_link_components, safe_alias,
 };
@@ -168,6 +168,14 @@ fn quick_candidates(inputs: &ClaudeDiscoveryInputs) -> Vec<Candidate> {
                 existing_root_id: None,
                 path: home.path,
                 alias: home.alias,
+                method: DiscoveryMethod::DefaultHome,
+            });
+        }
+        for path in claude_managed_instance_homes(app_data_dir) {
+            candidates.push(Candidate {
+                existing_root_id: None,
+                alias: safe_alias(&path),
+                path,
                 method: DiscoveryMethod::DefaultHome,
             });
         }

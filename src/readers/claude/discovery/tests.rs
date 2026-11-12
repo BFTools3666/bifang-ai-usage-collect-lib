@@ -509,6 +509,34 @@ fn quick_discovery_accepts_claude_desktop_local_agent_homes() {
     assert_eq!(result.coverage.state, CoverageState::Complete);
 }
 
+/// 验证 AIManagerData 托管的 Claude 实例目录被默认快速发现确认。
+#[test]
+fn quick_discovery_accepts_aimanager_managed_instances() {
+    let temp = tempdir().expect("temporary app data is available");
+    let instance = temp.path().join("AIManagerData/claude/instances/claude_a1");
+    write_transcript(&instance.join(format!("projects/project-a/{SESSION_ID}.jsonl")));
+
+    let result = discover_claude_quick(
+        &ClaudeDiscoveryInputs {
+            app_data_dir: Some(temp.path().to_path_buf()),
+            ..ClaudeDiscoveryInputs::default()
+        },
+        &CancellationToken::new(),
+    );
+
+    assert_eq!(result.roots.len(), 1);
+    assert!(
+        result.roots[0]
+            .path
+            .ends_with("AIManagerData/claude/instances/claude_a1")
+    );
+    assert_eq!(
+        result.roots[0].discovery_method,
+        DiscoveryMethod::DefaultHome
+    );
+    assert_eq!(result.coverage.state, CoverageState::Complete);
+}
+
 /// 验证同一会话集合下多个会话各自成为独立数据根，别名互不冲突。
 #[test]
 fn quick_discovery_keeps_each_desktop_agent_session_distinct() {

@@ -56,6 +56,21 @@ pub fn claude_desktop_agent_homes(app_data_dir: &Path) -> Vec<ClaudeDesktopAgent
     homes
 }
 
+/// 在固定两层布局内枚举 AIManagerData 托管的 Claude 实例数据根。
+///
+/// 托管实例通过 `CLAUDE_CONFIG_DIR` 指向 `AIManagerData/claude/instances/<实例>`，
+/// 从 Finder 启动的 GUI 读不到该环境变量，只能按固定相对路径读取目录项。层级
+/// 固定、不递归；是否含有 transcript 用量仍由结构签名判定。目录缺失、无权限或
+/// 读取失败按空结果处理，不污染整体发现覆盖状态。
+pub fn claude_managed_instance_homes(app_data_dir: &Path) -> Vec<PathBuf> {
+    child_directories(
+        &app_data_dir
+            .join("AIManagerData")
+            .join("claude")
+            .join("instances"),
+    )
+}
+
 /// 按名称升序返回目录下的全部非链接子目录；读取失败按空目录处理。
 ///
 /// 固定排序保证同一台设备上的候选顺序稳定，让共享签名预算的消费顺序可复现。
