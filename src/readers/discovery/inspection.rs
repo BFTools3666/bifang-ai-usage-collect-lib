@@ -410,9 +410,9 @@ pub fn reject_symlink_components(path: &Path) -> std::io::Result<bool> {
 
 /// 从根到叶自顶向下遍历路径祖先，遇到首个链接类节点即短路返回。
 ///
-/// 与 [`reject_symlink_components`] 共享同一遍历实现：发现阶段把缺失祖先当作
+/// 与内部的符号链接拒绝检查共享同一遍历实现：发现阶段把缺失祖先当作
 /// “尚未产生链接”（宽松容错，避免误杀正在创建中的候选目录），而
-/// [`file_source::inspect_rollout_file`] 把任何遍历错误（含缺失祖先）都当作
+/// 文件来源检查把任何遍历错误（含缺失祖先）都当作
 /// Indeterminate（严格失败，因为文件已经打开，缺失祖先意味着发生了竞态)。
 pub fn walk_ancestors_for_link_component(path: &Path) -> std::io::Result<bool> {
     let mut ancestors = path

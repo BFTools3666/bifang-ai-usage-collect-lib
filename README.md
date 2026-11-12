@@ -2,14 +2,26 @@
 
 独立 Rust 依赖包，提供 Codex、Claude Code、Grok、ZCode 和 WorkBuddy 本机用量的只读获取，以及 Token 校验、规范化、去重和通用统计。最低 Rust 为 1.95，edition 为 2024。
 
-本目录被产品根 workspace 显式排除，清单、版本和锁文件独立维护。其他 Rust 应用直接引用本包即可，无需依赖DDRank面板、Tauri、SQLite 或异步运行时：
+## 快速接入
+
+任何 Rust 项目（Rust 1.95+、edition 2024）都可以直接依赖本包，只读本机来源，不需要面板、Tauri 或网络。默认特性只有同步的纯计算与读取，不引入 SQLite 和异步运行时：
 
 ```toml
 [dependencies]
-ai_usage_collect_scan = { version = "0.3.1", path = "../ai_usage_collect_scan" }
+ai_usage_collect_scan = { git = "https://github.com/BFTools3666/bifang-ai-usage-collect-lib.git", branch = "master" }
+# 需要按 Agent 持久化统计时再启用（带入 sea-orm / tokio，调用者提供 Tokio 运行时）：
+# ai_usage_collect_scan = { git = "...", branch = "master", features = ["storage"] }
 ```
 
-包遵守目录内的商业许可证，当前 `publish = false`，没有发布到 crates.io。
+| 特性 | 默认 | 作用 |
+| --- | --- | --- |
+| （无） | 开启 | 来源发现、单文件只读解析、规范化、去重与通用统计 |
+| `storage` | 关闭 | 按 Agent 分库的统计 SQLite（`storage::LocalIndex`、`storage::WorkbuddyIndex`） |
+| `test-util` | 关闭 | 跨 crate 回归用的故障注入和旧指纹解码工具，业务代码不要启用 |
+
+使用顺序：`readers::*::discovery` 找到来源根 → `input::read_usage_file` 流式读取为 `UsageCall` → `canonicalize_usage_calls` 与 `attach_session_snapshots` 去重对账 → `aggregate_canonical_usage` / `group_usage` / `summarize_usage` 统计。完整示例见下文“单文件读取”，全部公开接口的说明以 `cargo doc --open --all-features` 生成的 Rust 文档为准。
+
+本包不提交 `Cargo.lock`（`.gitignore` 已排除 `*.lock`），依赖版本由使用方工程锁定。仓库内工作区通过 `.gitmodules` 引用本库，克隆时使用 `git clone --recurse-submodules`。本包遵守目录内的商业许可证，当前 `publish = false`，没有发布到 crates.io。
 
 ## 能力边界
 
@@ -25,7 +37,7 @@ ai_usage_collect_scan = { version = "0.3.1", path = "../ai_usage_collect_scan" }
 ## 按 Agent 保存统计
 
 ```toml
-ai_usage_collect_scan = { version = "0.3.1", path = "../ai_usage_collect_scan", features = ["storage"] }
+ai_usage_collect_scan = { git = "https://github.com/BFTools3666/bifang-ai-usage-collect-lib.git", branch = "master", features = ["storage"] }
 ```
 
 `storage::LocalIndex::open(base_dir, relative_path, client)` 要求绝对基准目录、非空相对路径和 `SourceClientKind`。例如同一基准目录分别使用 `codex.db`、`claude.db`、`grok.db`、`glm.db`。嵌套相对目录可自动创建；拒绝绝对路径、父目录跳转、链接、WorkBuddy、错 Agent 与未知业务数据库。库不决定产品目录，也不从当前进程读取 GUI 设置；调用者提供 Tokio 运行时。
@@ -143,7 +155,7 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 ## 测试
 
 ```bash
-cargo test --manifest-path ai_usage_collect_scan/Cargo.toml --all-features --locked
+cargo test --all-targets --all-features
 ```
 
 Linux 临时目录位于 tmpfs 时，将 `TMPDIR` 指向本机持久磁盘目录，让合成来源通过本地卷策略。

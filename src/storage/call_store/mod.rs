@@ -40,7 +40,7 @@ impl LocalIndex {
     }
 
     /// 在一个短事务中插入或刷新一批来源调用（Codex 置信度替换规则），
-    /// 并返回首次插入数量；批次内部语义见 [`insert_usage_batch`]。
+    /// 并返回首次插入数量。
     pub async fn insert_usage_batch(
         &mut self,
         source_id: &str,
@@ -84,8 +84,7 @@ impl LocalIndex {
         }
     }
 
-    /// 在一个短事务中对一批 Claude 观察执行单调 upsert；批次内部语义见
-    /// [`insert_claude_usage_batch`]。
+    /// 在一个短事务中对一批 Claude 观察执行单调 upsert。
     pub async fn insert_claude_usage_batch(
         &mut self,
         source_id: &str,
