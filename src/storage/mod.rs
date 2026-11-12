@@ -3,11 +3,13 @@
 //! 不存储 GUI 设置、账号凭据或其他产品业务表；宿主拥有调度与运行时。
 
 mod discovery_candidates;
+pub use checkpoint::SourceCheckpointBundle;
 pub use discovery_candidates::ConfirmedRootCandidate;
 mod file_import;
 pub use file_import::PreparedFileIndex;
 mod binding;
 mod call_store;
+mod clock;
 mod checkpoint;
 pub mod workbuddy;
 pub use workbuddy::{WorkbuddyIndex, WorkbuddyIndexOutcome, WorkbuddyRefreshMode};

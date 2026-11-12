@@ -139,9 +139,8 @@ impl LocalIndex {
             )
         })?;
         let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| {
+            super::clock::unix_now()
+                .ok_or_else(|| {
                     LocalError::new(
                         LocalErrorKind::InvalidUsage,
                         "observation time is unavailable",

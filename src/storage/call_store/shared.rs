@@ -224,45 +224,44 @@ pub(crate) fn from_sql_u64(value: i64) -> Result<u64, LocalError> {
         .map_err(|_| LocalError::new(LocalErrorKind::Database, "stored counter is negative"))
 }
 
-pub(super) const UPSERT_TOKEN_SNAPSHOT_SQL: &str = "INSERT INTO usage_token_snapshots
-     (source_id, generation, thread_key, occurred_at_epoch_ms, logical_call_id,
-      total_tokens, model, reasoning_effort, project_key)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-     ON CONFLICT(source_id, generation, thread_key, occurred_at_epoch_ms, logical_call_id)
-     DO UPDATE SET
-       total_tokens = excluded.total_tokens,
-       model = excluded.model,
-       reasoning_effort = excluded.reasoning_effort,
-       project_key = excluded.project_key";
+/// 每条多行 UPSERT 最多携带的快照行数；9 列 × 100 行 = 900 个绑定参数，
+/// 低于 SQLite 旧版默认 999 的绑定上限，对新版 32766 上限同样安全。
+pub(super) const SNAPSHOT_UPSERT_CHUNK_ROWS: usize = 100;
 
-/// 写入一条会话 cumulative 快照；同一事件的归档副本按主键覆盖。
-pub(super) async fn execute_token_snapshot(
-    transaction: &DatabaseTransaction,
-    source_id: &str,
-    generation: i64,
-    snapshot: &SessionTokenSnapshot,
-) -> Result<u64, LocalError> {
-    let result = transaction
-        .execute_raw(statement(
-            UPSERT_TOKEN_SNAPSHOT_SQL,
-            vec![
-                source_id.into(),
-                generation.into(),
-                (&snapshot.thread_key).into(),
-                snapshot.occurred_at_epoch_ms.into(),
-                (&snapshot.logical_call_id).into(),
-                to_sql_u64(snapshot.cumulative_total_tokens)?.into(),
-                snapshot.model.clone().into(),
-                snapshot.reasoning_effort.clone().into(),
-                snapshot.project_key.clone().into(),
-            ],
-        ))
-        .await
-        .into_local_result()?;
-    Ok(result.rows_affected())
+/// 构造 `rows` 行的多行快照 UPSERT；冲突时按主键整体覆盖，
+/// 与逐行执行同一语句的最终状态一致（同一语句内重复主键按行序后者胜出）。
+fn token_snapshot_upsert_sql(rows: usize) -> String {
+    let mut sql = String::from(
+        "INSERT INTO usage_token_snapshots
+         (source_id, generation, thread_key, occurred_at_epoch_ms, logical_call_id,
+          total_tokens, model, reasoning_effort, project_key) VALUES ",
+    );
+    for row in 0..rows {
+        if row > 0 {
+            sql.push_str(", ");
+        }
+        let base = row * 9;
+        sql.push('(');
+        for column in 1..=9 {
+            if column > 1 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&format!("?{}", base + column));
+        }
+        sql.push(')');
+    }
+    sql.push_str(
+        " ON CONFLICT(source_id, generation, thread_key, occurred_at_epoch_ms, logical_call_id)
+         DO UPDATE SET
+           total_tokens = excluded.total_tokens,
+           model = excluded.model,
+           reasoning_effort = excluded.reasoning_effort,
+           project_key = excluded.project_key",
+    );
+    sql
 }
 
-/// 在当前事务中写入一批会话快照。
+/// 在当前事务中以分块多行 UPSERT 写入一批会话快照；同一事件的归档副本按主键覆盖。
 pub(crate) async fn insert_token_snapshots(
     transaction: &DatabaseTransaction,
     source_id: &str,
@@ -274,11 +273,25 @@ pub(crate) async fn insert_token_snapshots(
     }
     let generation = to_sql_u64(generation)?;
     let mut written = 0_u64;
-    for snapshot in snapshots.drain(..) {
-        execute_token_snapshot(transaction, source_id, generation, &snapshot)
+    for chunk in snapshots.chunks(SNAPSHOT_UPSERT_CHUNK_ROWS) {
+        let mut values: Vec<sea_orm::Value> = Vec::with_capacity(chunk.len() * 9);
+        for snapshot in chunk {
+            values.push(source_id.into());
+            values.push(generation.into());
+            values.push((&snapshot.thread_key).into());
+            values.push(snapshot.occurred_at_epoch_ms.into());
+            values.push((&snapshot.logical_call_id).into());
+            values.push(to_sql_u64(snapshot.cumulative_total_tokens)?.into());
+            values.push(snapshot.model.clone().into());
+            values.push(snapshot.reasoning_effort.clone().into());
+            values.push(snapshot.project_key.clone().into());
+        }
+        transaction
+            .execute_raw(statement(&token_snapshot_upsert_sql(chunk.len()), values))
             .await
             .into_local_result()?;
-        written = written.saturating_add(1);
+        written = written.saturating_add(chunk.len() as u64);
     }
+    snapshots.clear();
     Ok(written)
 }

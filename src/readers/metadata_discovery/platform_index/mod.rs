@@ -63,7 +63,7 @@ impl Drop for RootQueryTrace<'_> {
 
 #[cfg(target_os = "windows")]
 impl RootQueryTrace<'_> {
-    /// 熔断：任一系统索引请求超时即放弃整个系统索引阶段，由调用方随后 `break` 出根循环。
+    /// 熔断：任一系统索引请求超时即放弃整个系统索引阶段，此后根循环通过 [`wait::PhaseFuse::exhausted`] 结束整个阶段。
     ///
     /// 索引器对该请求是“挂住”而不是快速报错，继续逐根重试只会让每个根都白等一个超时；
     /// 系统索引只是加速，目录遍历随后仍会完整覆盖。
@@ -86,7 +86,7 @@ pub(super) fn query(
     mut on_path: impl FnMut(PathBuf),
 ) -> bool {
     use std::future::IntoFuture;
-    use wait::{INDEX_OPERATION_TIMEOUT, WaitOutcome, wait_for_operation};
+    use wait::{INDEX_OPERATION_TIMEOUT, PhaseFuse, WaitOutcome, wait_for_operation};
     use windows::Storage::Search::{FolderDepth, IndexerOption, QueryOptions};
     use windows::Storage::StorageFolder;
     use windows::core::HSTRING;
@@ -107,8 +107,9 @@ pub(super) fn query(
         return false;
     }
     let mut any_query_succeeded = false;
-    'roots: for (ordinal, root) in volumes.search_roots.iter().enumerate() {
-        if coordinator.is_cancel_requested() {
+    let mut fuse = PhaseFuse::default();
+    for (ordinal, root) in volumes.search_roots.iter().enumerate() {
+        if fuse.exhausted() || coordinator.is_cancel_requested() {
             break;
         }
         let mut trace = RootQueryTrace {
@@ -124,18 +125,20 @@ pub(super) fn query(
         else {
             continue;
         };
-        let folder = match wait_for_operation(
+        let folder_outcome = wait_for_operation(
             folder_operation.clone().into_future(),
             coordinator,
             INDEX_OPERATION_TIMEOUT,
             || {
                 let _ = folder_operation.Cancel();
             },
-        ) {
+        );
+        fuse.observe(&folder_outcome);
+        let folder = match folder_outcome {
             WaitOutcome::Ready(folder) => folder,
             WaitOutcome::TimedOut => {
                 trace.abandon();
-                break 'roots;
+                continue;
             }
             WaitOutcome::Stopped => continue,
         };
@@ -150,18 +153,20 @@ pub(super) fn query(
             let Ok(operation) = query.GetFilesAsync(offset, 512) else {
                 break;
             };
-            let files = match wait_for_operation(
+            let files_outcome = wait_for_operation(
                 operation.clone().into_future(),
                 coordinator,
                 INDEX_OPERATION_TIMEOUT,
                 || {
                     let _ = operation.Cancel();
                 },
-            ) {
+            );
+            fuse.observe(&files_outcome);
+            let files = match files_outcome {
                 WaitOutcome::Ready(files) => files,
                 WaitOutcome::TimedOut => {
                     trace.abandon();
-                    break 'roots;
+                    break;
                 }
                 WaitOutcome::Stopped => break,
             };

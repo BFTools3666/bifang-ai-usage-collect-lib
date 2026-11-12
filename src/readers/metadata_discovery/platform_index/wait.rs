@@ -40,6 +40,29 @@ pub(super) enum WaitOutcome<T> {
     Stopped,
 }
 
+/// 一个发现阶段共享的熔断预算：任一请求超时即耗尽，之后该阶段不再发起新请求。
+///
+/// 根循环只需在每轮开头询问 [`Self::exhausted`]，不必在各处超时分支里手写跨层 `break`。
+#[derive(Debug, Default)]
+pub(super) struct PhaseFuse {
+    /// 是否已有请求超时。
+    tripped: bool,
+}
+
+impl PhaseFuse {
+    /// 记录一次请求结果；仅 [`WaitOutcome::TimedOut`] 使预算耗尽，明确错误与取消不熔断。
+    pub(super) fn observe<T>(&mut self, outcome: &WaitOutcome<T>) {
+        if matches!(outcome, WaitOutcome::TimedOut) {
+            self.tripped = true;
+        }
+    }
+
+    /// 阶段预算是否已耗尽；耗尽后调用方应结束整个阶段。
+    pub(super) fn exhausted(&self) -> bool {
+        self.tripped
+    }
+}
+
 /// 等待已经启动的异步系统请求；完成错误、截止或用户取消均放弃本次加速。
 pub(super) fn wait_for_operation<T, E>(
     future: impl Future<Output = Result<T, E>>,
@@ -151,5 +174,19 @@ mod tests {
         );
         assert_eq!(cancellations.get(), 1);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// 只有超时使阶段熔断；成功、明确错误与取消都保持预算可用。
+    #[test]
+    fn phase_fuse_trips_only_on_timeout() {
+        let mut fuse = PhaseFuse::default();
+        assert!(!fuse.exhausted());
+        fuse.observe(&WaitOutcome::Ready(1));
+        fuse.observe::<()>(&WaitOutcome::Stopped);
+        assert!(!fuse.exhausted());
+        fuse.observe::<()>(&WaitOutcome::TimedOut);
+        assert!(fuse.exhausted());
+        fuse.observe(&WaitOutcome::Ready(1));
+        assert!(fuse.exhausted(), "熔断后不可恢复");
     }
 }

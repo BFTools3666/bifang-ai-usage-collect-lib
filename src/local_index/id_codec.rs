@@ -78,11 +78,7 @@ fn push_hex_byte(output: &mut String, byte: u8) {
 // 但不能从输出反推原始 value（单向），是本产品“索引不保存真实路径/
 // session id，只保存可去重比较的匿名指纹”这条隐私原则的底层工具函数。
 pub fn stable_id(namespace: &str, value: &str) -> String {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in namespace.bytes().chain([0]).chain(value.bytes()) {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
+    let hash = crate::fnv::fnv1a64(namespace.bytes().chain([0]).chain(value.bytes()));
     format!("{namespace}-{hash:016x}")
 }
 
@@ -139,5 +135,22 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.starts_with("root-"));
         assert_ne!(stable_id("source", "/tmp/example"), first);
+    }
+
+    /// 钉住持久化 ID 的 FNV-1a 黄金值，防止重构改变既有索引键。
+    #[test]
+    fn stable_id_golden_values() {
+        let long = "x".repeat(200);
+        let cases = [
+            ("root", "", "root-4dd1e2461dbc53bf"),
+            ("root", "/tmp/example", "root-96c4d4f693f2e13c"),
+            ("source", "中文/路径", "source-c5ac0077a1231abe"),
+            ("a", long.as_str(), "a-bcc17d28a4f98b64"),
+            ("", "", "-af63bd4c8601b7df"),
+            ("model", "gpt-5", "model-4909fdc1cf0c1389"),
+        ];
+        for (namespace, value, expected) in cases {
+            assert_eq!(stable_id(namespace, value), expected);
+        }
     }
 }

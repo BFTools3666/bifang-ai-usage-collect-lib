@@ -80,6 +80,7 @@ pub use policy::{
     workbuddy_scan_source_from_path,
 };
 mod cancellation;
+mod fnv;
 pub use cancellation::{CancellationSignal, ScanCancellation};
 mod local_index;
 pub use local_index::{

@@ -49,12 +49,9 @@ fn percent_decode(input: &str) -> String {
 
 /// 把单个 ASCII 十六进制字符转成 0–15。
 fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    char::from(byte)
+        .to_digit(16)
+        .and_then(|digit| u8::try_from(digit).ok())
 }
 
 /// 将 Claude `projects` 目录名转为受控末段：普通名直接消毒；以 `-` 开头的编码路径先按 Claude 规则还原再取末段。

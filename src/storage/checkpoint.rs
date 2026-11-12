@@ -14,6 +14,17 @@ use crate::SourceFileObservation;
 
 use crate::storage::sql::statement;
 
+/// 单个来源 checkpoint 的完整读取结果（同一 `ready = 1` 行的三类列）。
+#[derive(Debug, Clone)]
+pub struct SourceCheckpointBundle {
+    /// 与 [`LocalIndex::stored_source_file`] 相同的 checkpoint 元数据。
+    pub stored: StoredSourceFile,
+    /// 与 [`LocalIndex::load_parse_context`] 相同的增量解析上下文。
+    pub parse_context: SourceParseCheckpoint,
+    /// 与 [`LocalIndex::load_source_warning_counts_json`] 相同的原始警告快照。
+    pub warning_counts_json: Option<String>,
+}
+
 impl LocalIndex {
     /// 返回一个来源当前生效的安全 checkpoint。
     pub async fn stored_source_file(
@@ -34,25 +45,37 @@ impl LocalIndex {
         else {
             return Ok(None);
         };
-        Ok(Some(StoredSourceFile {
-            source_id: row.try_get_by_index(0).into_local_result()?,
-            root_id: row.try_get_by_index(1).into_local_result()?,
-            relative_label: row.try_get_by_index(2).into_local_result()?,
-            file_identity: row.try_get_by_index(3).into_local_result()?,
-            archived: row.try_get_by_index(4).into_local_result()?,
-            observed_size: from_sql_u64(row.try_get_by_index(5).into_local_result()?)?,
-            modified_at_epoch_ms: row.try_get_by_index(6).into_local_result()?,
-            parsed_offset: from_sql_u64(row.try_get_by_index(7).into_local_result()?)?,
-            trailing_bytes: from_sql_u64(row.try_get_by_index(8).into_local_result()?)?,
-            parser_version: u32::try_from(row.try_get_by_index::<i64>(9).into_local_result()?)
-                .map_err(|_| {
-                    LocalError::new(
-                        super::LocalErrorKind::Database,
-                        "stored parser version is invalid",
-                    )
-                })?,
-            generation: from_sql_u64(row.try_get_by_index(10).into_local_result()?)?,
-            token_snapshots_ready: row.try_get_by_index(11).into_local_result()?,
+        Ok(Some(decode_stored_source_file(&row)?))
+    }
+
+    /// 以单次查询读取一个来源的 checkpoint、警告快照与解析上下文，等价于依次调用
+    /// [`Self::stored_source_file`]、[`Self::load_source_warning_counts_json`] 与
+    /// [`Self::load_parse_context`]（同一 `ready = 1` 行），把每个文件三次往返压成一次。
+    pub async fn load_source_checkpoint_bundle(
+        &self,
+        source_id: &str,
+    ) -> Result<Option<SourceCheckpointBundle>, LocalError> {
+        let Some(row) = self
+            .scan_connection()
+            .query_one_raw(statement(
+                "SELECT source_id, root_id, relative_label, file_identity, archived,
+                        observed_size, modified_at_epoch_ms, parsed_offset, trailing_bytes,
+                        parser_version, generation, token_snapshots_ready,
+                        thread_key, project_key, project_label, thread_label,
+                        model, reasoning_effort, call_sequence, adapter_state,
+                        warning_counts_json
+                 FROM source_files WHERE source_id = ?1 AND ready = 1",
+                vec![source_id.into()],
+            ))
+            .await
+            .into_local_result()?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(SourceCheckpointBundle {
+            stored: decode_stored_source_file(&row)?,
+            parse_context: decode_parse_context(&row, 12)?,
+            warning_counts_json: row.try_get_by_index(20).into_local_result()?,
         }))
     }
 
@@ -119,16 +142,7 @@ impl LocalIndex {
         else {
             return Ok(None);
         };
-        Ok(Some(SourceParseCheckpoint {
-            thread_key: row.try_get_by_index(0).into_local_result()?,
-            project_key: row.try_get_by_index(1).into_local_result()?,
-            project_label: row.try_get_by_index(2).into_local_result()?,
-            thread_label: row.try_get_by_index(3).into_local_result()?,
-            model: row.try_get_by_index(4).into_local_result()?,
-            reasoning_effort: row.try_get_by_index(5).into_local_result()?,
-            call_sequence: from_sql_u64(row.try_get_by_index(6).into_local_result()?)?,
-            adapter_state: row.try_get_by_index(7).into_local_result()?,
-        }))
+        Ok(Some(decode_parse_context(&row, 0)?))
     }
 
     /// 读取来源最近一次完整 checkpoint 的脱敏警告分类快照。
@@ -410,4 +424,45 @@ async fn commit_checkpoint<C: ConnectionTrait + ?Sized>(
         .await
         .into_local_result()?;
     Ok(())
+}
+
+/// 从按 `stored_source_file` 列序选取的行解码 checkpoint 元数据。
+fn decode_stored_source_file(row: &sea_orm::QueryResult) -> Result<StoredSourceFile, LocalError> {
+    Ok(StoredSourceFile {
+        source_id: row.try_get_by_index(0).into_local_result()?,
+        root_id: row.try_get_by_index(1).into_local_result()?,
+        relative_label: row.try_get_by_index(2).into_local_result()?,
+        file_identity: row.try_get_by_index(3).into_local_result()?,
+        archived: row.try_get_by_index(4).into_local_result()?,
+        observed_size: from_sql_u64(row.try_get_by_index(5).into_local_result()?)?,
+        modified_at_epoch_ms: row.try_get_by_index(6).into_local_result()?,
+        parsed_offset: from_sql_u64(row.try_get_by_index(7).into_local_result()?)?,
+        trailing_bytes: from_sql_u64(row.try_get_by_index(8).into_local_result()?)?,
+        parser_version: u32::try_from(row.try_get_by_index::<i64>(9).into_local_result()?)
+            .map_err(|_| {
+                LocalError::new(
+                    super::LocalErrorKind::Database,
+                    "stored parser version is invalid",
+                )
+            })?,
+        generation: from_sql_u64(row.try_get_by_index(10).into_local_result()?)?,
+        token_snapshots_ready: row.try_get_by_index(11).into_local_result()?,
+    })
+}
+
+/// 从自 `base` 起依次为解析上下文八列的行解码。
+fn decode_parse_context(
+    row: &sea_orm::QueryResult,
+    base: usize,
+) -> Result<SourceParseCheckpoint, LocalError> {
+    Ok(SourceParseCheckpoint {
+        thread_key: row.try_get_by_index(base).into_local_result()?,
+        project_key: row.try_get_by_index(base + 1).into_local_result()?,
+        project_label: row.try_get_by_index(base + 2).into_local_result()?,
+        thread_label: row.try_get_by_index(base + 3).into_local_result()?,
+        model: row.try_get_by_index(base + 4).into_local_result()?,
+        reasoning_effort: row.try_get_by_index(base + 5).into_local_result()?,
+        call_sequence: from_sql_u64(row.try_get_by_index(base + 6).into_local_result()?)?,
+        adapter_state: row.try_get_by_index(base + 7).into_local_result()?,
+    })
 }

@@ -25,9 +25,7 @@ pub(super) fn backup_stale_database(
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .ok_or_else(|| io::Error::other("database file name is not valid UTF-8"))?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
+    let stamp = super::clock::unix_now().map_or(0, |elapsed| elapsed.as_secs());
     let backup = database_path.with_file_name(format!("{name}.v{stale_version}-{stamp}.zip"));
     let mut archive = zip::ZipWriter::new(create_private_file(&backup)?);
     let options = zip::write::SimpleFileOptions::default()

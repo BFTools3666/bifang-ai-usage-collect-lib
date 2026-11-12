@@ -3,7 +3,7 @@ use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
 use super::super::LocalErrorKind;
 use super::shared::statement;
 use super::*;
-use crate::{Confidence, TokenUsage, UsageCall};
+use crate::{Confidence, SessionTokenSnapshot, TokenUsage, UsageCall};
 
 /// 使用当前完整 schema 隔离批次事务；本组无来源夹具，显式关闭外键检查。
 async fn test_connection() -> DatabaseConnection {
@@ -566,5 +566,144 @@ async fn latest_adapter_consistency_key_is_source_and_generation_scoped() {
             .await
             .expect("other source is readable"),
         None
+    );
+}
+
+/// 批内大量重复线程键（含超过预取分块大小的不同线程）与逐行语义一致：
+/// exact 优先、derived 被丢弃、冲突行被覆盖且只计首次插入。
+#[tokio::test]
+async fn batch_handles_duplicate_and_many_thread_keys() {
+    let connection = test_connection().await;
+    let mut batch = Vec::new();
+    // 1200 个不同线程（超过 500 的预取分块），每个线程重复出现。
+    for index in 0..1_200 {
+        let thread = format!("thread-{index}");
+        batch.push(call(
+            &format!("d-{index}"),
+            &thread,
+            Confidence::Derived,
+            1,
+            None,
+            None,
+            1,
+        ));
+        batch.push(call(
+            &format!("e-{index}"),
+            &thread,
+            Confidence::Exact,
+            5,
+            None,
+            None,
+            1,
+        ));
+        batch.push(call(
+            &format!("d2-{index}"),
+            &thread,
+            Confidence::Derived,
+            9,
+            None,
+            None,
+            1,
+        ));
+    }
+    let added = insert_batch_in_own_transaction(&connection, "source", 1, &mut batch)
+        .await
+        .expect("large batch writes");
+    // derived 先写入，随后被同线程 exact 删除；之后 derived 被丢弃。
+    assert_eq!(added, 2_400);
+    let rows = connection
+        .query_all_raw(statement(
+            "SELECT confidence, COUNT(*) FROM usage_calls GROUP BY confidence",
+            vec![],
+        ))
+        .await
+        .expect("counts load");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].try_get_by_index::<String>(0).expect("label"),
+        "exact"
+    );
+    assert_eq!(rows[0].try_get_by_index::<i64>(1).expect("count"), 1_200);
+
+    // 再次写入同一批 exact：全部冲突走 upsert，不增加计数。
+    let mut again: Vec<UsageCall> = (0..1_200)
+        .map(|index| {
+            call(
+                &format!("e-{index}"),
+                &format!("thread-{index}"),
+                Confidence::Exact,
+                7,
+                None,
+                None,
+                1,
+            )
+        })
+        .collect();
+    let added = insert_batch_in_own_transaction(&connection, "source", 1, &mut again)
+        .await
+        .expect("conflicting batch upserts");
+    assert_eq!(added, 0);
+    let total = connection
+        .query_one_raw(statement(
+            "SELECT SUM(input_tokens), COUNT(*) FROM usage_calls",
+            vec![],
+        ))
+        .await
+        .expect("sum loads")
+        .expect("row exists");
+    assert_eq!(total.try_get_by_index::<i64>(0).expect("sum"), 7 * 1_200);
+    assert_eq!(total.try_get_by_index::<i64>(1).expect("count"), 1_200);
+}
+
+/// 构造快照夹具。
+fn snapshot(thread: &str, at: i64, id: &str, total: u64) -> SessionTokenSnapshot {
+    SessionTokenSnapshot {
+        thread_key: thread.to_owned(),
+        occurred_at_epoch_ms: at,
+        cumulative_total_tokens: total,
+        logical_call_id: id.to_owned(),
+        model: Some("m".to_owned()),
+        reasoning_effort: None,
+        project_key: None,
+        provenance: Vec::new(),
+    }
+}
+
+/// 快照多行 UPSERT 跨越分块边界时与逐行写入结果一致：主键冲突覆盖、同批重复后者胜出。
+#[tokio::test]
+async fn token_snapshots_chunked_upsert_matches_per_row_semantics() {
+    let connection = test_connection().await;
+    let count = shared::SNAPSHOT_UPSERT_CHUNK_ROWS * 2 + 7;
+    let mut first: Vec<SessionTokenSnapshot> = (0..count)
+        .map(|i| snapshot("thread", i as i64, &format!("id-{i}"), 10))
+        .collect();
+    // 同批内重复主键：后者胜出。
+    first.push(snapshot("thread", 0, "id-0", 99));
+    let total = first.len() as u64;
+    let transaction = connection.begin().await.expect("tx begins");
+    let written = insert_token_snapshots(&transaction, "source", 1, &mut first)
+        .await
+        .expect("snapshots write");
+    assert_eq!(written, total);
+    assert!(first.is_empty());
+    // 已存在行再次写入：覆盖。
+    let mut second = vec![snapshot("thread", 1, "id-1", 55)];
+    insert_token_snapshots(&transaction, "source", 1, &mut second)
+        .await
+        .expect("conflict overwrites");
+    transaction.commit().await.expect("tx commits");
+    let rows = connection
+        .query_all_raw(statement(
+            "SELECT logical_call_id, total_tokens FROM usage_token_snapshots ORDER BY occurred_at_epoch_ms",
+            vec![],
+        ))
+        .await
+        .expect("rows load");
+    assert_eq!(rows.len(), count);
+    assert_eq!(rows[0].try_get_by_index::<i64>(1).expect("total"), 99);
+    assert_eq!(rows[1].try_get_by_index::<i64>(1).expect("total"), 55);
+    assert_eq!(
+        rows[count - 1].try_get_by_index::<i64>(1).expect("total"),
+        10
     );
 }

@@ -275,11 +275,7 @@ pub fn file_identity(file: &mut File) -> Result<String, LocalError> {
     file.seek(SeekFrom::Start(0)).map_err(map_source_io_error)?;
     let mut prefix = [0_u8; 64];
     let read = file.read(&mut prefix).map_err(map_source_io_error)?;
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in &prefix[..read] {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
+    let hash = crate::fnv::fnv1a64(prefix[..read].iter().copied());
     Ok(format!("file-{read}-{hash:016x}"))
 }
 
@@ -316,9 +312,32 @@ pub fn source_relative_path<'a>(root: &Path, path: &'a Path) -> Result<&'a Path,
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use tempfile::tempdir;
 
     use super::*;
+
+    /// 钉住文件开头指纹的 FNV-1a 黄金值（含空文件、UTF-8 与超过 64 字节的截断）。
+    #[test]
+    fn file_identity_golden_values() {
+        let long = vec![b'x'; 100];
+        let cases: [(&[u8], &str); 4] = [
+            (b"", "file-0-cbf29ce484222325"),
+            (b"hello", "file-5-a430d84680aabd0b"),
+            (&long, "file-64-b96a5acbb56db825"),
+            ("é中".as_bytes(), "file-5-cf247b10b1eee8b8"),
+        ];
+        let dir = tempdir().expect("tempdir");
+        for (index, (content, expected)) in cases.into_iter().enumerate() {
+            let path = dir.path().join(format!("f{index}"));
+            File::create(&path)
+                .and_then(|mut file| file.write_all(content))
+                .expect("write fixture");
+            let mut file = File::open(&path).expect("open fixture");
+            assert_eq!(file_identity(&mut file).expect("identity"), expected);
+        }
+    }
 
     /// 验证来源 I/O 映射丢弃底层路径文本并保留权限分类。
     #[test]

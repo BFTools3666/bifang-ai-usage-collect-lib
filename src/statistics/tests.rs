@@ -41,6 +41,22 @@ fn call(
 
 /// 验证 Top-N、其余项与总计对全部可加字段严格对账。
 #[test]
+fn stable_group_id_golden_values() {
+    let cases = [
+        (UsageDimension::Model, None, "e6104504144237c6"),
+        (UsageDimension::Model, Some(""), "bb020d3315a8b28e"),
+        (UsageDimension::Model, Some("gpt-5"), "4909fdc1cf0c1389"),
+        (UsageDimension::Model, Some("项目"), "27cb79ae9d01c4b5"),
+    ];
+    for (dimension, key, hash) in cases {
+        assert_eq!(
+            stable_group_id(dimension, key),
+            format!("statistics-{hash}")
+        );
+    }
+}
+
+#[test]
 fn bounded_groups_reconcile_with_total_and_sort_deterministically() {
     let canonical = canonicalize_usage_calls(vec![
         call("a", Some("model-b"), "root-a", 110, 20),

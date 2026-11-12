@@ -244,6 +244,64 @@ async fn publishes_all_scan_sources_atomically_and_rolls_back_cancelled_attempts
     );
 }
 
+/// 合并查询必须与三次独立查询逐字段一致，未就绪或缺失来源返回 `None`。
+#[tokio::test]
+async fn checkpoint_bundle_matches_separate_loaders() {
+    let temp = tempfile::tempdir().expect("isolated app data is available");
+    let mut index =
+        LocalIndex::open_in_app_data(temp.path(), crate::readers::jsonl::PARSER_VERSION)
+            .await
+            .expect("index opens");
+    index
+        .begin_scan("bundle", 1_000)
+        .await
+        .expect("scan starts");
+    index
+        .register_root_fields(
+            "root-publication",
+            temp.path(),
+            "publication root",
+            DiscoveryMethod::Registered,
+        )
+        .await
+        .expect("root is staged");
+    stage_scan_source(&mut index, "source-a", 10).await;
+    let bundle = index
+        .load_source_checkpoint_bundle("source-a")
+        .await
+        .expect("bundle loads")
+        .expect("ready row exists");
+    assert_eq!(
+        Some(bundle.stored),
+        index
+            .stored_source_file("source-a")
+            .await
+            .expect("stored loads")
+    );
+    assert_eq!(
+        Some(bundle.parse_context),
+        index
+            .load_parse_context("source-a")
+            .await
+            .expect("context loads")
+    );
+    assert_eq!(
+        bundle.warning_counts_json,
+        index
+            .load_source_warning_counts_json("source-a")
+            .await
+            .expect("warnings load")
+    );
+    assert!(bundle.warning_counts_json.is_some());
+    assert!(
+        index
+            .load_source_checkpoint_bundle("missing")
+            .await
+            .expect("missing source is not an error")
+            .is_none()
+    );
+}
+
 /// 取消必须恢复扫描前的保留窗口数据、根删除/Partial 与 activation claim。
 #[tokio::test]
 async fn cancelled_attempt_restores_pruned_usage_and_reconciled_roots() {

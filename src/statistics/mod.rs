@@ -85,15 +85,12 @@ pub fn stable_group_id(dimension: UsageDimension, key: Option<&str>) -> String {
         UsageDimension::Thread => "thread",
         UsageDimension::Root => "root",
     };
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in namespace
-        .bytes()
-        .chain([0])
-        .chain(key.unwrap_or("<unknown>").bytes())
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
+    let hash = crate::fnv::fnv1a64(
+        namespace
+            .bytes()
+            .chain([0])
+            .chain(key.unwrap_or("<unknown>").bytes()),
+    );
 
     format!("statistics-{hash:016x}")
 }

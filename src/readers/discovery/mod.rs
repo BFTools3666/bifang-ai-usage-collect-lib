@@ -16,8 +16,8 @@ pub use crate::{path_key, stable_id};
 pub use full_device::discover_full_device_with_progress;
 pub use inspection::{
     RootInspection, SignatureProbeContext, inspect_root, metadata_is_link_like,
-    registered_path_matches_candidate, validate_local_plain_directory,
-    walk_ancestors_for_link_component,
+    registered_path_matches_candidate, registered_paths_matching_candidates,
+    validate_local_plain_directory, walk_ancestors_for_link_component,
 };
 pub use quick::discover_quick;
 

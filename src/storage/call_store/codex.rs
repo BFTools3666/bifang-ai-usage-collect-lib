@@ -12,6 +12,9 @@ use super::shared::{
     in_placeholders, statement, to_sql_u64,
 };
 
+/// 预取 IN 列表每块的线程键数量上限。
+const PREFETCH_THREAD_CHUNK: usize = 500;
+
 /// 一次性预取批次内全部线程当前是否已经写过 exact 记录；批内如果某个
 /// 线程在处理过程中才第一次写入 exact 记录，循环体会同步把它计入这个
 /// 内存集合，因此和逐行查询数据库的写法在“看见批内更早写入的 exact”
@@ -23,25 +26,25 @@ async fn prefetch_exact_threads(
     thread_keys: &[String],
 ) -> Result<HashSet<String>, LocalError> {
     let mut exact_threads = HashSet::with_capacity(thread_keys.len());
-    if thread_keys.is_empty() {
-        return Ok(exact_threads);
-    }
-    let placeholders = in_placeholders(3, thread_keys.len());
-    let mut values: Vec<sea_orm::Value> = vec![source_id.into(), generation.into()];
-    values.extend(thread_keys.iter().map(Into::into));
-    let rows = transaction
-        .query_all_raw(statement(
-            &format!(
-                "SELECT DISTINCT thread_key FROM usage_calls
-                 WHERE source_id = ?1 AND generation = ?2
-                   AND confidence = 'exact' AND thread_key IN ({placeholders})"
-            ),
-            values,
-        ))
-        .await
-        .into_local_result()?;
-    for row in rows {
-        exact_threads.insert(row.try_get_by_index::<String>(0).into_local_result()?);
+    // 分块以保证绑定参数数量低于 SQLite 旧版 999 上限（另有 2 个固定参数）。
+    for chunk in thread_keys.chunks(PREFETCH_THREAD_CHUNK) {
+        let placeholders = in_placeholders(3, chunk.len());
+        let mut values: Vec<sea_orm::Value> = vec![source_id.into(), generation.into()];
+        values.extend(chunk.iter().map(Into::into));
+        let rows = transaction
+            .query_all_raw(statement(
+                &format!(
+                    "SELECT DISTINCT thread_key FROM usage_calls
+                     WHERE source_id = ?1 AND generation = ?2
+                       AND confidence = 'exact' AND thread_key IN ({placeholders})"
+                ),
+                values,
+            ))
+            .await
+            .into_local_result()?;
+        for row in rows {
+            exact_threads.insert(row.try_get_by_index::<String>(0).into_local_result()?);
+        }
     }
     Ok(exact_threads)
 }
@@ -64,7 +67,14 @@ pub(crate) async fn insert_usage_batch(
         return Ok(0);
     }
     let generation = to_sql_u64(generation)?;
-    let thread_keys: Vec<String> = batch.iter().map(|call| call.thread_key.clone()).collect();
+    // 去重并保持首次出现顺序，避免 IN 列表随重复线程键无谓膨胀。
+    let mut seen_threads: HashSet<&str> = HashSet::new();
+    let thread_keys: Vec<String> = batch
+        .iter()
+        .filter(|call| seen_threads.insert(call.thread_key.as_str()))
+        .map(|call| call.thread_key.clone())
+        .collect();
+    drop(seen_threads);
     let mut exact_threads =
         prefetch_exact_threads(transaction, source_id, generation, &thread_keys)
             .await

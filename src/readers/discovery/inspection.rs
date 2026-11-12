@@ -112,6 +112,61 @@ pub fn registered_path_matches_candidate(
     }
 }
 
+/// 读取一个已校验目录的物理身份；读取失败或 Windows ReFS 返回 `None`
+/// （与 [`same_physical_directory`] 对这些情形“不合并”的结果一致）。
+fn physical_directory_identity(path: &Path) -> Option<same_file::Handle> {
+    #[cfg(target_os = "windows")]
+    {
+        let volume = whichdisk::resolve(path).ok()?;
+        if volume.fs_type().eq_ignore_ascii_case("refs") {
+            return None;
+        }
+    }
+    same_file::Handle::from_path(path).ok()
+}
+
+/// 批量版 [`registered_path_matches_candidate`]：每个候选与每个历史路径各只校验一次、
+/// 各只读取一次物理身份，再按身份与字面路径查表匹配（O(D+R)）。
+///
+/// 返回值按 `candidates` 顺序，每项是匹配的 `registered` 下标（升序）。与逐对调用并把
+/// 错误视为“不匹配”的语义一致：候选不合格、历史路径缺失/不合格/身份不确定都得到空匹配。
+pub fn registered_paths_matching_candidates(
+    registered: &[&Path],
+    candidates: &[&Path],
+) -> Vec<Vec<usize>> {
+    use std::collections::{BTreeSet, HashMap};
+
+    let mut by_path: HashMap<&Path, Vec<usize>> = HashMap::new();
+    let mut by_identity: HashMap<same_file::Handle, Vec<usize>> = HashMap::new();
+    for (index, path) in registered.iter().enumerate() {
+        if validate_local_plain_directory(path).is_err() {
+            continue;
+        }
+        by_path.entry(path).or_default().push(index);
+        if let Some(identity) = physical_directory_identity(path) {
+            by_identity.entry(identity).or_default().push(index);
+        }
+    }
+    candidates
+        .iter()
+        .map(|candidate| {
+            if validate_local_plain_directory(candidate).is_err() {
+                return Vec::new();
+            }
+            let mut matched = BTreeSet::new();
+            if let Some(indices) = by_path.get(candidate) {
+                matched.extend(indices.iter().copied());
+            }
+            if let Some(identity) = physical_directory_identity(candidate)
+                && let Some(indices) = by_identity.get(&identity)
+            {
+                matched.extend(indices.iter().copied());
+            }
+            matched.into_iter().collect()
+        })
+        .collect()
+}
+
 /// 保存一次主动发现任务共享的结构探测取消令牌与硬预算。
 pub struct SignatureProbeContext<'a> {
     /// 用于中途响应取消请求的令牌。
@@ -413,4 +468,70 @@ pub fn safe_path_alias(path: &Path) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or("Codex 数据根")
         .to_owned()
+}
+
+#[cfg(all(test, unix))]
+mod batch_match_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// 逐对参考实现：与批量匹配必须逐项一致。
+    fn pairwise(registered: &[&Path], candidates: &[&Path]) -> Vec<Vec<usize>> {
+        candidates
+            .iter()
+            .map(|candidate| {
+                registered
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, registered)| {
+                        registered_path_matches_candidate(registered, candidate).unwrap_or(false)
+                    })
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn batch_matching_equals_pairwise_for_aliases_duplicates_and_invalid_roots() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().canonicalize().expect("canonical temp");
+        let real = base.join("real");
+        let other = base.join("other");
+        let file = base.join("file");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(&file, b"x").unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dotted = real.join("..").join("real");
+        let missing = base.join("missing");
+
+        let registered: Vec<PathBuf> = vec![
+            real.clone(),
+            dotted.clone(),
+            real.clone(),
+            link.clone(),
+            other.clone(),
+            file.clone(),
+            missing.clone(),
+        ];
+        let candidates: Vec<PathBuf> = vec![
+            real.clone(),
+            dotted,
+            link,
+            other,
+            file,
+            missing,
+            real.clone(),
+        ];
+        let registered: Vec<&Path> = registered.iter().map(PathBuf::as_path).collect();
+        let candidates: Vec<&Path> = candidates.iter().map(PathBuf::as_path).collect();
+
+        let batch = registered_paths_matching_candidates(&registered, &candidates);
+        assert_eq!(batch, pairwise(&registered, &candidates));
+        assert_eq!(batch[0], vec![0, 1, 2]);
+        assert!(batch[2].is_empty(), "linked candidate never matches");
+        assert!(batch[4].is_empty() && batch[5].is_empty());
+    }
 }
