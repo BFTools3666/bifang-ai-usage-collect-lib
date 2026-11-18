@@ -172,6 +172,15 @@ pub(super) fn candidate_from_file_name(
         return None;
     }
     let name = path.file_name()?.to_str()?;
+    if agents.contains(SourceClientKind::Glm)
+        && name == "db.sqlite"
+        && crate::readers::glm::path_rules::is_glm_database_root(parent)
+    {
+        return Some((
+            parent.to_path_buf(),
+            RootCandidateEvidence::GlmModelIoUpdates,
+        ));
+    }
     if agents.contains(SourceClientKind::Codex)
         && name.starts_with("rollout-")
         && name.ends_with(".jsonl")

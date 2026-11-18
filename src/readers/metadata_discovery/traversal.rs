@@ -7,7 +7,7 @@ use crate::readers::{LocalVolumeRoots, is_obviously_network_path};
 use crate::{
     RootCandidate, RootCandidateEvidence, RootDiscoveryAgentScope, RootDiscoveryCoordinator,
     RootDiscoveryPlatform, RootDiscoveryProgress, RootDiscoveryScope, RootDiscoveryStrategy,
-    is_discovery_path_excluded, path_has_full_discovery_skip_directory_name,
+    is_discovery_path_excluded,
 };
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
@@ -251,10 +251,8 @@ pub(super) fn discover_metadata_roots_in_with_callback(
                 }
             }
             for (path, evidence) in result.candidates {
-                if path_has_full_discovery_skip_directory_name(&path)
-                    || excluded_roots
-                        .iter()
-                        .any(|excluded| path.starts_with(excluded))
+                if !path.starts_with(&traversal_root)
+                    || is_discovery_path_excluded(&path, &traversal_root, &excluded_roots)
                 {
                     progress.skipped = progress.skipped.saturating_add(1);
                     continue;

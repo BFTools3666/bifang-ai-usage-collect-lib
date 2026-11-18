@@ -290,6 +290,86 @@ async fn workbuddy_dual_root_snapshot_preserves_metadata_and_reads_without_sourc
     assert_eq!(remaining.records.len(), 1);
 }
 
+/// 固定根发现失败保留已发布的计量和检查点，修复后合并两版。
+#[tokio::test]
+async fn workbuddy_fixed_root_failure_preserves_previous_snapshot_as_partial() {
+    let temp = tempfile::tempdir().expect("isolated home");
+    let home = fs::canonicalize(temp.path()).expect("canonical home");
+    let domestic = home.join(".workbuddy/projects/project");
+    let international = home.join(".workbuddy-ai/projects");
+    fs::create_dir_all(&domestic).expect("domestic layout");
+    fs::write(domestic.join("session.jsonl"), event("same", 1000, 10)).expect("domestic record");
+    let app = tempfile::tempdir().expect("isolated index");
+    let mut index = WorkbuddyIndex::open(app.path(), Path::new("workbuddy.db"))
+        .await
+        .expect("open index");
+    let scan = WorkbuddyRefreshMode::Incremental;
+    index
+        .refresh_from_user_home(Some(&home), 0, scan, NeverCancelled)
+        .await
+        .expect("a legitimately absent second root allows first publication");
+
+    fs::create_dir_all(international.parent().expect("fixed home")).expect("international home");
+    fs::write(&international, "").expect("invalid projects directory");
+    assert_eq!(
+        index
+            .refresh_from_user_home(Some(&home), 0, scan, NeverCancelled)
+            .await
+            .expect_err("the invalid root must be rejected")
+            .kind(),
+        LocalErrorKind::SourceUnavailable,
+    );
+    let partial = index
+        .load_inputs()
+        .await
+        .expect("load")
+        .expect("previous snapshot");
+    assert_eq!(partial.coverage.state, CoverageState::Partial);
+    assert_eq!(partial.root_aliases.len(), 1);
+    assert_eq!(partial.records.len(), 1);
+    assert_eq!(partial.records[0].total_tokens, 13);
+
+    fs::remove_file(&international).expect("remove invalid fixture");
+    let project = international.join("project");
+    fs::create_dir_all(&project).expect("international layout");
+    fs::write(project.join("session.jsonl"), event("same", 1000, 30))
+        .expect("international record");
+    let outcome = index
+        .refresh_from_user_home(Some(&home), 0, scan, NeverCancelled)
+        .await
+        .expect("updated publication");
+    assert_eq!(outcome.unchanged_files, 1);
+    let complete = index
+        .load_inputs()
+        .await
+        .expect("load")
+        .expect("new snapshot");
+    assert_eq!(complete.coverage.state, CoverageState::Complete);
+    assert_eq!(complete.root_aliases.len(), 2);
+    assert_eq!(
+        complete
+            .records
+            .iter()
+            .map(|record| record.total_tokens)
+            .sum::<i64>(),
+        46
+    );
+    assert!(
+        index
+            .refresh_from_user_home(None, 0, scan, NeverCancelled)
+            .await
+            .is_err()
+    );
+    let unresolved = index
+        .load_inputs()
+        .await
+        .expect("load")
+        .expect("previous snapshot");
+    assert_eq!(unresolved.coverage.state, CoverageState::Partial);
+    assert_eq!(unresolved.root_aliases, complete.root_aliases);
+    assert_eq!(unresolved.records.len(), 2);
+}
+
 /// 跨追加身份冲突及写入失败不得推进检查点或发布半份记录，后续修复可继续续读。
 #[tokio::test]
 async fn workbuddy_conflicts_and_write_failure_preserve_the_previous_publication() {

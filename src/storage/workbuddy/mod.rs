@@ -71,6 +71,44 @@ impl WorkbuddyIndex {
         Ok(Self { connection })
     }
 
+    /// 从当前用户固定双根更新索引，把来源探测失败纳入快照覆盖状态。
+    /// # Errors
+    /// 任一固定根无法安全探测时保留旧计量并降低覆盖，不会读取其内容。
+    pub async fn refresh_from_user_home<C>(
+        &mut self,
+        user_home: Option<&Path>,
+        since_epoch_ms: i64,
+        mode: WorkbuddyRefreshMode,
+        cancellation: C,
+    ) -> Result<WorkbuddyIndexOutcome, LocalError>
+    where
+        C: CancellationSignal + Clone + 'static,
+    {
+        let Some(user_home) = user_home.map(Path::to_path_buf) else {
+            self.record_failure(&[]).await?;
+            return Err(source_error());
+        };
+        let discovery_cancellation = cancellation.clone();
+        let discovered = tokio::task::spawn_blocking(move || {
+            if discovery_cancellation.is_cancelled() {
+                return Err(source_error());
+            }
+            crate::readers::workbuddy::discover_workbuddy_sources_from_user_home(&user_home)
+                .map_err(|_| source_error())
+        })
+        .await;
+        match discovered {
+            Ok(Ok(sources)) => {
+                self.refresh(&sources, since_epoch_ms, mode, cancellation)
+                    .await
+            }
+            _ => {
+                self.record_failure(&[]).await?;
+                Err(source_error())
+            }
+        }
+    }
+
     /// 同一事务发布固定两根全部安全增量；错误或取消保留旧数据并标记覆盖不完整。
     /// # Errors
     /// 来源不完整、冲突或数据库错误不会发布半份统计或推进 checkpoint。

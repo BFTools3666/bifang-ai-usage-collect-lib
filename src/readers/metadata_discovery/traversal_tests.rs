@@ -50,6 +50,41 @@ fn fair_jobs_do_not_resume_ancestors_while_deeper_work_is_dispatched() {
     assert_eq!(queues[0].pending.len(), 1);
 }
 
+/// 独立确认的本地卷可以穿过已排除的挂载容器，但不得进入卷内被排除的子挂载。
+#[test]
+fn traversal_keeps_candidates_on_confirmed_mounts_inside_excluded_containers() {
+    use crate::readers::LocalVolumeRoots;
+
+    let temp = tempfile::tempdir().expect("isolated mount fixture");
+    let container = temp.path().join("mount-container");
+    let volume = container.join("local-volume");
+    let rejected_mount = volume.join("rejected-mount");
+    let expected = volume.join("codex-data");
+    for directory in [&expected, &rejected_mount] {
+        let sessions = directory.join("sessions");
+        std::fs::create_dir_all(&sessions).expect("session layout");
+        std::fs::write(sessions.join("rollout-synthetic.jsonl"), b"metadata only")
+            .expect("session file");
+    }
+    let coordinator = RootDiscoveryCoordinator::default();
+    super::super::discover_metadata_roots_in_with_callback(
+        &coordinator,
+        LocalVolumeRoots {
+            search_roots: vec![temp.path().into(), volume],
+            excluded_roots: vec![container, rejected_mount],
+            ..LocalVolumeRoots::default()
+        },
+        Vec::new(),
+        RootDiscoveryAgentScope::all_physical(),
+        &|_| {},
+    );
+
+    let candidates = coordinator.candidates();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].absolute_path, expected);
+    assert_eq!(coordinator.snapshot().progress.volumes_completed, 2);
+}
+
 /// 遍历每个搜索根完成时各发出一次带计数的诊断事件，最后发出阶段结束事件，且不含完整路径。
 #[test]
 fn traversal_reports_each_root_once_and_the_phase_end() {
