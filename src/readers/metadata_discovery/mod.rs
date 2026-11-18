@@ -11,7 +11,7 @@ use crate::{
     CoverageReport, RootCandidate, RootCandidateEvidence, RootDiscoveryAgentScope,
     RootDiscoveryCoordinator, RootDiscoveryProgress, RootDiscoveryScope, RootDiscoveryStrategy,
     SourceClientKind, append_platform_discovery_excludes_for_volumes,
-    path_has_full_discovery_skip_directory_name, stable_id,
+    discovery_policy::discovery_path_has_prefix, is_discovery_path_excluded, stable_id,
 };
 
 use super::current_user_home;
@@ -29,6 +29,7 @@ mod platform_index;
 mod scope;
 mod traversal;
 use traversal::discover_metadata_roots_in_with_callback;
+pub(crate) use traversal::{DirectoryProbe, traverse_metadata_roots};
 #[cfg(test)]
 use traversal::{MetadataWorkerPool, VolumeQueue, take_fair_jobs};
 
@@ -129,14 +130,15 @@ pub fn discover_metadata_roots_with_callback(
         if coordinator.is_cancel_requested() {
             return;
         }
-        if path_blocked_by_discovery_policy(&path, &volumes)
-            || !path_is_in_search_scope(&path, &volumes)
+        if !path_is_in_search_scope(&path, &volumes)
             || path_under_unselected_agent_directory(&path, agents)
         {
             return;
         }
         if let Some((candidate, evidence)) = candidate_from_file_name(&path, agents)
             && validate_local_plain_directory(&candidate).is_ok()
+            && let Ok(candidate) = std::fs::canonicalize(candidate)
+            && path_is_in_search_scope(&candidate, &volumes)
         {
             submit_candidate(
                 coordinator,
@@ -421,23 +423,10 @@ pub fn discover_metadata_roots_in(
 
 /// Spotlight 等系统索引结果必须服从当前用户目录或本地卷边界。
 fn path_is_in_search_scope(path: &Path, volumes: &LocalVolumeRoots) -> bool {
-    volumes
-        .search_roots
-        .iter()
-        .any(|root| path.starts_with(root))
-}
-
-/// 全盘策略：排除名单前缀或任意祖先目录名命中跳过名单。
-fn path_blocked_by_discovery_policy(path: &Path, volumes: &LocalVolumeRoots) -> bool {
-    if volumes
-        .excluded_roots
-        .iter()
-        .any(|excluded| path.starts_with(excluded))
-    {
-        return true;
-    }
-    path.ancestors()
-        .any(path_has_full_discovery_skip_directory_name)
+    volumes.search_roots.iter().any(|root| {
+        discovery_path_has_prefix(path, root)
+            && !is_discovery_path_excluded(path, root, &volumes.excluded_roots)
+    })
 }
 
 /// 仅为闭集内 Agent 按规范路径去重并提交候选，日志不得输出路径。

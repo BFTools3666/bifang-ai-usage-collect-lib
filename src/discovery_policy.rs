@@ -26,7 +26,7 @@ const WINDOWS_VOLUME_SKIP_DIRS: &[&str] = &[
     "NVIDIA Corporation",
 ];
 
-/// 任意深度遇到即跳过的目录名（不含用户 Library / Applications 这类可能含数据的名称）。
+/// 仅在系统或挂载卷根下识别的目录名；同名普通目录仍可搜索。
 fn full_discovery_skip_directory_names() -> &'static [&'static str] {
     #[cfg(target_os = "windows")]
     {
@@ -96,7 +96,7 @@ pub fn is_full_discovery_skip_directory_name(name: &str) -> bool {
         .any(|skip| name.eq_ignore_ascii_case(skip))
 }
 
-/// 路径末段是否命中全盘跳过目录名。
+/// 路径末段是否匹配系统目录名候选；路径是否受保护须再核对准确范围。
 pub fn path_has_full_discovery_skip_directory_name(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -109,12 +109,42 @@ pub fn is_discovery_path_excluded(
     traversal_root: &Path,
     excluded_roots: &[PathBuf],
 ) -> bool {
-    if path_has_full_discovery_skip_directory_name(path) {
-        return true;
+    excluded_roots.iter().any(|excluded| {
+        discovery_path_has_prefix(path, excluded)
+            && !discovery_path_has_prefix(traversal_root, excluded)
+    })
+}
+
+/// 匹配完整路径组件。Windows 的常规盘符和规范化盘符访问同一个卷。
+pub(crate) fn discovery_path_has_prefix(path: &Path, prefix: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::path::{Component, Prefix};
+
+        let drive_letter = |prefix| match prefix {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                Some(letter.to_ascii_uppercase())
+            }
+            _ => None,
+        };
+        let mut path_components = path.components();
+        prefix
+            .components()
+            .all(|expected| match (path_components.next(), expected) {
+                (Some(Component::Prefix(left)), Component::Prefix(right)) => {
+                    left == right
+                        || drive_letter(left.kind())
+                            .is_some_and(|letter| Some(letter) == drive_letter(right.kind()))
+                }
+                (Some(Component::Normal(left)), Component::Normal(right)) => {
+                    left.eq_ignore_ascii_case(right)
+                }
+                (Some(left), right) => left == right,
+                (None, _) => false,
+            })
     }
-    excluded_roots
-        .iter()
-        .any(|excluded| path.starts_with(excluded) && !traversal_root.starts_with(excluded))
+    #[cfg(not(target_os = "windows"))]
+    path.starts_with(prefix)
 }
 
 /// 在全设备发现前先应用的平台保守排除策略（不含按卷展开的相对目录）。

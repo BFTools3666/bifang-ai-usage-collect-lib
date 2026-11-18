@@ -120,7 +120,7 @@ pub struct RootDiscoveryProgress {
     pub directories_checked: u64,
     /// 已检查的普通文件名数量。
     pub file_names_checked: u64,
-    /// 当前去重后的候选数。
+    /// 本轮发现的不同位置数，包含已登记或已确认的位置。
     pub candidates_found: u64,
     /// 权限拒绝数量。
     pub permission_denied: u64,
@@ -282,8 +282,8 @@ pub struct RootDiscoveryCoordinator {
 struct RootDiscoveryState {
     /// 发现任务当前对外状态。
     status: RootDiscoveryStatus,
-    /// 按候选 ID 保存的待确认候选。
-    candidates: BTreeMap<String, RootCandidate>,
+    /// 按 ID 记录本轮命中；登记后释放候选路径，但保留该 ID 及计数。
+    candidates: BTreeMap<String, Option<RootCandidate>>,
     /// 候选的首次出现顺序，保证列表稳定。
     candidate_order: Vec<String>,
     /// 是否已请求取消；任务据此尽快停止。
@@ -401,7 +401,7 @@ impl RootDiscoveryCoordinator {
         state
             .candidate_order
             .iter()
-            .filter_map(|id| state.candidates.get(id).cloned())
+            .filter_map(|id| state.candidates.get(id).and_then(Option::as_ref).cloned())
             .collect()
     }
 
@@ -418,6 +418,7 @@ impl RootDiscoveryCoordinator {
                 state
                     .candidates
                     .get(id)
+                    .and_then(Option::as_ref)
                     .cloned()
                     .ok_or(RootCandidateSelectionError::UnknownCandidate)
             })
@@ -428,12 +429,10 @@ impl RootDiscoveryCoordinator {
     pub fn remove_candidates(&self, candidate_ids: &[String]) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         for id in candidate_ids {
-            state.candidates.remove(id);
-            state
-                .candidate_order
-                .retain(|candidate_id| candidate_id != id);
+            if let Some(candidate) = state.candidates.get_mut(id) {
+                *candidate = None;
+            }
         }
-        state.status.progress.candidates_found = state.candidates.len() as u64;
     }
 
     /// 追加候选并按临时 ID 去重；首次插入返回 `true`。
@@ -442,7 +441,9 @@ impl RootDiscoveryCoordinator {
         let inserted = !state.candidates.contains_key(&candidate.id);
         if inserted {
             state.candidate_order.push(candidate.id.clone());
-            state.candidates.insert(candidate.id.clone(), candidate);
+            state
+                .candidates
+                .insert(candidate.id.clone(), Some(candidate));
         }
         state.status.progress.candidates_found = state.candidates.len() as u64;
         inserted

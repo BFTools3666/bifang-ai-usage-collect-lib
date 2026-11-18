@@ -35,23 +35,20 @@ pub(super) struct PreparedFile {
     pub rebuilt: bool,
     pub unchanged: bool,
 }
-/// 一轮固定根的完整枚举和安全增量结果，失败不会提交半份来源。
+/// 一轮来源的完整枚举和安全增量结果，失败不会提交半份来源。
 pub(super) struct PreparedUpdate {
     pub files: Vec<PreparedFile>,
     pub root_aliases: BTreeMap<String, String>,
     pub bytes_read: u64,
 }
 
-/// 在宿主受控 blocking 岛内枚举两根并续读完整行，所有 source 错误均失败关闭。
+/// 在宿主受控 blocking 岛内对各已校验根续读完整行，来源错误失败关闭。
 pub(super) fn prepare_update<C: CancellationSignal + ?Sized>(
     sources: &[WorkbuddyScanSource],
     known: &BTreeMap<String, Checkpoint>,
     force_rebuild: bool,
     cancellation: &C,
 ) -> Result<PreparedUpdate, LocalError> {
-    if sources.len() > 2 {
-        return Err(source_error());
-    }
     let mut prepared = PreparedUpdate {
         files: Vec::new(),
         root_aliases: BTreeMap::new(),

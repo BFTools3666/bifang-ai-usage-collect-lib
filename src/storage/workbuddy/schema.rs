@@ -1,10 +1,13 @@
 //! WorkBuddy 派生库的独立格式，拒绝接管来源库或其它 Agent 的库。
 use super::{WorkbuddyIndex, database_error};
-use crate::{LocalError, LocalErrorKind};
+use crate::{LocalError, LocalErrorKind, WorkbuddyEdition};
 use sea_orm::{ConnectionTrait, TransactionTrait};
 
 /// ASCII AWB1 标识，只用于本产品的 WorkBuddy 派生库。
 const APPLICATION_ID: i64 = 0x4157_4231;
+/// 各版本使用不同的 SQLite 标记，避免同格式下串读另一版或旧共享库。
+const DOMESTIC_APPLICATION_ID: i64 = 0x4157_4232;
+const INTERNATIONAL_APPLICATION_ID: i64 = 0x4157_4233;
 /// checkpoint 与安全事件格式的首个稳定代次。
 const SCHEMA_VERSION: i64 = 1;
 
@@ -13,9 +16,10 @@ pub(super) use crate::storage::sql::statement;
 /// 校验独立格式及列形状；空库初始化先取得 writer 并复核，避免并发首次打开竞争。
 pub(super) async fn ensure_schema(
     connection: &sea_orm::DatabaseConnection,
+    edition: Option<WorkbuddyEdition>,
 ) -> Result<(), LocalError> {
     let check = connection.begin().await.map_err(database_error)?;
-    let empty = is_empty(&check).await?;
+    let empty = is_empty(&check, edition).await?;
     check.rollback().await.map_err(database_error)?;
     if empty {
         let transaction = connection
@@ -25,7 +29,7 @@ pub(super) async fn ensure_schema(
             })
             .await
             .map_err(database_error)?;
-        if is_empty(&transaction).await? {
+        if is_empty(&transaction, edition).await? {
             transaction.execute_raw(statement(
                 "CREATE TABLE workbuddy_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), state_json TEXT NOT NULL);
                  CREATE TABLE workbuddy_files (source_id TEXT PRIMARY KEY, checkpoint_json TEXT NOT NULL);
@@ -33,7 +37,23 @@ pub(super) async fn ensure_schema(
                    sequence INTEGER NOT NULL, occurred_at INTEGER NOT NULL, record_json TEXT NOT NULL CHECK(length(record_json)<=16384),
                    PRIMARY KEY(source_id,sequence));
                  CREATE INDEX workbuddy_events_time ON workbuddy_events(occurred_at);
-                 PRAGMA application_id=1096237617; PRAGMA user_version=1;",vec![])).await.map_err(database_error)?;
+                 PRAGMA user_version=1;",vec![])).await.map_err(database_error)?;
+            let identifier = match edition {
+                Some(WorkbuddyEdition::Domestic) => "PRAGMA application_id=1096237618",
+                Some(WorkbuddyEdition::International) => "PRAGMA application_id=1096237619",
+                None => "PRAGMA application_id=1096237617",
+            };
+            transaction
+                .execute_raw(statement(identifier, vec![]))
+                .await
+                .map_err(database_error)?;
+            if edition.is_some() {
+                transaction.execute_raw(statement(
+                    "CREATE TABLE workbuddy_roots (root_id TEXT PRIMARY KEY, access_path BLOB NOT NULL UNIQUE,
+                       built_in INTEGER NOT NULL CHECK(built_in IN (0,1)), indexed INTEGER NOT NULL CHECK(indexed IN (0,1)));",
+                    vec![],
+                )).await.map_err(database_error)?;
+            }
         }
         transaction.commit().await.map_err(database_error)?;
     }
@@ -58,10 +78,22 @@ pub(super) async fn ensure_schema(
         ))
         .await
         .map_err(database_error)?;
+    if edition.is_some() {
+        connection
+            .query_all_raw(statement(
+                "SELECT root_id, access_path, built_in, indexed FROM workbuddy_roots LIMIT 0",
+                vec![],
+            ))
+            .await
+            .map_err(database_error)?;
+    }
     Ok(())
 }
 /// 只有无对象且标记全空才可初始化；拒绝未知库、额外表、view 和触发器。
-async fn is_empty<C: ConnectionTrait>(connection: &C) -> Result<bool, LocalError> {
+async fn is_empty<C: ConnectionTrait>(
+    connection: &C,
+    edition: Option<WorkbuddyEdition>,
+) -> Result<bool, LocalError> {
     let identity = integer(connection, "PRAGMA application_id").await?;
     let version = integer(connection, "PRAGMA user_version").await?;
     let objects=connection.query_all_raw(statement("SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND type IN ('table','view','trigger') ORDER BY name",vec![])).await.map_err(database_error)?;
@@ -77,13 +109,36 @@ async fn is_empty<C: ConnectionTrait>(connection: &C) -> Result<bool, LocalError
             ))
         })
         .collect::<Result<Vec<_>, LocalError>>()?;
-    let expected = ["workbuddy_events", "workbuddy_files", "workbuddy_state"];
-    if identity != APPLICATION_ID
+    let (expected_identity, expected): (_, &[_]) = match edition {
+        Some(WorkbuddyEdition::Domestic) => (
+            DOMESTIC_APPLICATION_ID,
+            &[
+                "workbuddy_events",
+                "workbuddy_files",
+                "workbuddy_roots",
+                "workbuddy_state",
+            ],
+        ),
+        Some(WorkbuddyEdition::International) => (
+            INTERNATIONAL_APPLICATION_ID,
+            &[
+                "workbuddy_events",
+                "workbuddy_files",
+                "workbuddy_roots",
+                "workbuddy_state",
+            ],
+        ),
+        None => (
+            APPLICATION_ID,
+            &["workbuddy_events", "workbuddy_files", "workbuddy_state"],
+        ),
+    };
+    if identity != expected_identity
         || version != SCHEMA_VERSION
         || names
             .iter()
             .map(|(kind, name)| (kind.as_str(), name.as_str()))
-            .ne(expected.into_iter().map(|name| ("table", name)))
+            .ne(expected.iter().map(|name| ("table", *name)))
     {
         return Err(unsupported());
     }

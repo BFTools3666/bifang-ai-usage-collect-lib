@@ -12,7 +12,13 @@ fn wide_directory_resumes_without_collecting_all_children() {
         std::fs::create_dir(temp.path().join(format!("child-{index}"))).expect("child fixture");
     }
     let coordinator = RootDiscoveryCoordinator::default();
-    let pool = MetadataWorkerPool::new(1, RootDiscoveryAgentScope::all_physical(), coordinator);
+    let pool = MetadataWorkerPool::new(
+        1,
+        super::DirectoryProbe::Physical(RootDiscoveryAgentScope::all_physical()),
+        coordinator,
+        None,
+        None,
+    );
     let mut cursor = DirectoryCursor::new(temp.path().into());
     let mut found = HashSet::new();
     let mut chunks = 0;

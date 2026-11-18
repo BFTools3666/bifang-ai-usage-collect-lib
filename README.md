@@ -134,7 +134,7 @@ Codex 的累计快照通过报告保留，必须参与 `attach_session_snapshots
 | 元数据候选、范围和进度 | `readers::metadata_discovery` |
 | 本地卷、网络卷排除和用户目录 | `readers::volume_roots`、`readers::user_paths` |
 | 根内枚举 | `readers::directory`、`readers::{claude,grok,glm}::enumerate` |
-| WorkBuddy 国内/国际版固定布局读取 | `readers::workbuddy` |
+| WorkBuddy 国内/国际版布局发现和读取 | `readers::workbuddy` |
 | WorkBuddy 通用校验、去重和安全记录 | `workbuddy_facts` |
 | 规范化与通用统计 | `canonicalize_usage_calls`、`aggregate_canonical_usage`、`group_usage`、`summarize_usage` |
 
@@ -170,4 +170,6 @@ ZCode（Z Code CLI）使用 `JsonlFormat::Glm`，只接受获授权 rollout 根�
 
 ### WorkBuddy 增量派生库
 
-既有 `storage` feature 提供 `storage::WorkbuddyIndex::open(base_dir, relative_path)`；GUI 使用本产品 app-data 的 `workbuddy.db`。`refresh(sources, cutoff, WorkbuddyRefreshMode::Incremental, cancellation)` 只续读变化文件，`Rebuild` 用于用户重新索引；`load_inputs_with_cancellation` 返回同一份已发布的 `WorkbuddyUsageInputs`，不触碰原始 JSONL，`prune_before` 仅清理过期派生事件。两固定根原子发布，积分与顶层/subagent 信息保留，未知/其它 Agent 数据库拒绝接管。原始 `read_workbuddy_usage_inputs` API 仍可供明确选择无持久层的消费方使用；GUI 不把它作为读库失败的回退。
+使用 `storage::WorkbuddyIndex::open_edition(base_dir, WorkbuddyEdition::Domestic)` 或 `International` 打开独立版本库。调用者授权版本后，将 `RootDiscoveryScope::UserPriority` 或 `FullLocalVolumes` 传给 `refresh_edition`。快速范围核验内置根，全盘范围遍历可确认的本地卷。调用结果的 `roots_discovered` 是本轮命中数，`sources_with_discovery` 给出已登记的每个独立根及其发现来源。登记路径仅供原生使用。
+
+`Incremental` 续读变化文件，`Rebuild` 重建索引。`load_inputs_with_cancellation` 读取原子发布的计量、覆盖与脱敏根标签，不触碰原始 JSONL。`prune_before` 仅清理过期派生事件。旧 `open`、`refresh` 和直接只读 API 保留供现有消费者使用。

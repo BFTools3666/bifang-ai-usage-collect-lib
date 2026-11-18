@@ -13,7 +13,7 @@ impl CancellationSignal for NeverCancelled {
 }
 
 /// 合成含用量白名单与正文诱饵的完整行。
-fn event(id: &str, time: i64, input: i64) -> String {
+pub(super) fn event(id: &str, time: i64, input: i64) -> String {
     format!(
         "{}\n",
         serde_json::json!({"timestamp":time,"sessionId":"private-session", "cwd":"/private/project", "body":"private-body-bait", "providerData":{"messageId":id,"model":"model-a","usage":{"inputTokens":input,"inputTokensDetails":[{"cached_tokens":2}],"outputTokens":3,"totalTokens":input+3,"requests":1},"rawUsage":{"credit":0.5},"message":{"text":"private-provider-bait"}}})

@@ -51,7 +51,13 @@ fn traversal_worker_observes_cancellation_and_finishes_terminally() {
     ));
     assert!(coordinator.request_cancel());
 
-    let worker_pool = MetadataWorkerPool::new(1, all_agents(), coordinator.clone());
+    let worker_pool = MetadataWorkerPool::new(
+        1,
+        DirectoryProbe::Physical(all_agents()),
+        coordinator.clone(),
+        None,
+        None,
+    );
     let mut inspected = worker_pool.inspect(vec![(0, temp.path().into())]);
     let (_, inspected) = inspected.pop().expect("worker returns its cancelled job");
     let inspected = inspected.expect("cancelled inspection does not panic");

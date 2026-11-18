@@ -244,8 +244,10 @@ pub use source_root_alias::source_root_alias_from_path;
 mod source_visit;
 pub use source_visit::{SourceFileObservation, source_file_needs_visit};
 mod workbuddy_scan_source;
+pub(crate) use workbuddy_scan_source::matches_workbuddy_directory_name;
 pub use workbuddy_scan_source::{
     WORKBUDDY_HOME_DIR_NAME, WORKBUDDY_INTERNATIONAL_HOME_DIR_NAME, WORKBUDDY_PROJECTS_DIR_NAME,
-    WorkbuddyScanSource, discover_workbuddy_scan_source, discover_workbuddy_scan_sources,
-    workbuddy_home_from_user_home, workbuddy_homes_from_user_home, workbuddy_scan_source_from_path,
+    WorkbuddyEdition, WorkbuddyScanSource, discover_workbuddy_scan_source,
+    discover_workbuddy_scan_sources, workbuddy_home_from_user_home, workbuddy_homes_from_user_home,
+    workbuddy_scan_source_from_path,
 };

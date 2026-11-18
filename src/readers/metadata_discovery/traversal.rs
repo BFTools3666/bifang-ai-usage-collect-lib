@@ -1,16 +1,18 @@
 //! 分片深度优先的元数据发现；工作集随目录深度而非整盘目录数增长。
 use super::scope::{candidate_from_file_name, is_unselected_agent_directory, priority_queue};
 use super::{MetadataDiscoverySummary, record_volume_scope_gaps, root_label, submit_candidate};
+use crate::policy::matches_workbuddy_directory_name;
 use crate::readers::directory_cursor::DirectoryCursor;
 use crate::readers::discovery::metadata_is_link_like;
 use crate::readers::{LocalVolumeRoots, is_obviously_network_path};
 use crate::{
-    RootCandidate, RootCandidateEvidence, RootDiscoveryAgentScope, RootDiscoveryCoordinator,
-    RootDiscoveryPlatform, RootDiscoveryProgress, RootDiscoveryScope, RootDiscoveryStrategy,
+    CancellationSignal, RootCandidate, RootCandidateEvidence, RootDiscoveryAgentScope,
+    RootDiscoveryCoordinator, RootDiscoveryPlatform, RootDiscoveryProgress, RootDiscoveryScope,
+    RootDiscoveryStrategy, WORKBUDDY_PROJECTS_DIR_NAME, WorkbuddyEdition,
     is_discovery_path_excluded,
 };
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
 /// 单个片段最多保留的目录项；只限制工作集，不限制总遍历范围或批次数。
@@ -19,6 +21,32 @@ const DIRECTORY_CHUNK_ENTRIES: usize = 128;
 #[cfg(test)]
 #[path = "traversal_tests.rs"]
 mod tests;
+
+/// 共享卷遍历中的元数据识别目标；两类来源不交叉登记。
+#[derive(Clone, Copy)]
+pub(crate) enum DirectoryProbe {
+    /// 保留物理 Agent 的闭集与文件名证据。
+    Physical(RootDiscoveryAgentScope),
+    /// 仅识别指定 WorkBuddy 版本的目录布局。
+    Workbuddy(WorkbuddyEdition),
+}
+
+/// 目录遍历只返回路径与结构证据，不读取会话。
+#[derive(Debug)]
+pub(crate) struct DirectoryHit {
+    /// 原始本地目录路径，仅供原生调用者核验。
+    pub(crate) path: PathBuf,
+    /// 物理 Agent 证据；WorkBuddy 根由调用者自己的版本判断。
+    evidence: Option<RootCandidateEvidence>,
+}
+
+/// 卷范围在线程间共享，目录项在获取元数据前先检查排除边界。
+pub(super) struct TraversalBoundaries {
+    /// 按目录任务的卷编号对应搜索根。
+    roots: Vec<PathBuf>,
+    /// 这些挂载/策略边界不会被祖先卷任务跨入。
+    excluded: Vec<PathBuf>,
+}
 
 /// 单个卷的深度优先游标栈及其完成标记。
 #[derive(Debug)]
@@ -37,7 +65,7 @@ pub(super) struct DirectoryResult {
     /// 待继续入队的子目录。
     pub(super) children: Vec<DirectoryCursor>,
     /// 本次遍历命中的候选路径及其证据类型。
-    pub(super) candidates: Vec<(PathBuf, RootCandidateEvidence)>,
+    pub(super) candidates: Vec<DirectoryHit>,
     /// 当前目录尚未处理的原枚举游标，片段消费后继续使用同一句柄。
     continuation: Option<DirectoryCursor>,
     /// 本片是否首次访问目录。
@@ -77,8 +105,10 @@ impl MetadataWorkerPool {
     /// 创建固定大小的元数据探测工作池并启动受控 worker。
     pub(super) fn new(
         worker_count: usize,
-        agents: RootDiscoveryAgentScope,
+        probe: DirectoryProbe,
         coordinator: RootDiscoveryCoordinator,
+        cancellation: Option<Arc<dyn CancellationSignal>>,
+        boundaries: Option<Arc<TraversalBoundaries>>,
     ) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<(usize, DirectoryCursor)>(worker_count * 2);
         let receiver = Arc::new(Mutex::new(receiver));
@@ -88,6 +118,8 @@ impl MetadataWorkerPool {
             let receiver = Arc::clone(&receiver);
             let result_sender = result_sender.clone();
             let coordinator = coordinator.clone();
+            let cancellation = cancellation.clone();
+            let boundaries = boundaries.clone();
             workers.push(std::thread::spawn(move || {
                 loop {
                     let job = receiver
@@ -97,9 +129,21 @@ impl MetadataWorkerPool {
                     let Ok((volume, path)) = job else {
                         break;
                     };
-                    let result = std::panic::catch_unwind(|| {
-                        inspect_directory_metadata(path, agents, &coordinator)
-                    })
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let boundary = boundaries.as_ref().and_then(|bounds| {
+                            bounds
+                                .roots
+                                .get(volume)
+                                .map(|root| (root.as_path(), bounds.excluded.as_slice()))
+                        });
+                        inspect_directory_metadata(
+                            path,
+                            probe,
+                            &coordinator,
+                            cancellation.as_deref(),
+                            boundary,
+                        )
+                    }))
                     .map_err(|_| ());
                     if result_sender.send((volume, result)).is_err() {
                         break;
@@ -154,8 +198,42 @@ pub(super) fn discover_metadata_roots_in_with_callback(
     agents: RootDiscoveryAgentScope,
     on_candidate: &impl Fn(RootCandidate),
 ) -> MetadataDiscoverySummary {
+    traverse_metadata_roots(
+        coordinator,
+        volumes,
+        priority_roots,
+        DirectoryProbe::Physical(agents),
+        None,
+        |hit| {
+            if let Some(evidence) = hit.evidence {
+                submit_candidate(
+                    coordinator,
+                    hit.path,
+                    evidence,
+                    RootDiscoveryStrategy::MetadataTraversal,
+                    agents,
+                    on_candidate,
+                );
+            }
+        },
+    )
+}
+
+/// 逐卷消费共享目录游标，按调用方的范围识别并报告每个独立根。
+pub(crate) fn traverse_metadata_roots(
+    coordinator: &RootDiscoveryCoordinator,
+    volumes: LocalVolumeRoots,
+    priority_roots: Vec<PathBuf>,
+    probe: DirectoryProbe,
+    cancellation: Option<Arc<dyn CancellationSignal>>,
+    mut on_hit: impl FnMut(DirectoryHit),
+) -> MetadataDiscoverySummary {
     let total = u64::try_from(volumes.search_roots.len()).unwrap_or(u64::MAX);
     let excluded_roots = volumes.excluded_roots.clone();
+    let boundaries = Arc::new(TraversalBoundaries {
+        roots: volumes.search_roots.clone(),
+        excluded: excluded_roots.clone(),
+    });
     if coordinator.snapshot().lifecycle != crate::RootDiscoveryLifecycle::Running
         && !coordinator.start(
             RootDiscoveryStrategy::MetadataTraversal,
@@ -199,13 +277,21 @@ pub(super) fn discover_metadata_roots_in_with_callback(
             reported: false,
         })
         .collect::<Vec<_>>();
-    let worker_pool = MetadataWorkerPool::new(adaptive_worker_count(), agents, coordinator.clone());
+    let worker_count = adaptive_worker_count();
+    let worker_pool = MetadataWorkerPool::new(
+        worker_count,
+        probe,
+        coordinator.clone(),
+        cancellation.clone(),
+        Some(boundaries),
+    );
 
     while queues.iter().any(|queue| !queue.completed) {
-        if coordinator.is_cancel_requested() {
+        if cancelled(coordinator, cancellation.as_deref()) {
+            coordinator.request_cancel();
             break;
         }
-        let jobs = take_fair_jobs(&mut queues, adaptive_worker_count(), &mut next_volume);
+        let jobs = take_fair_jobs(&mut queues, worker_count, &mut next_volume);
         if jobs.is_empty() {
             mark_completed_queues(&mut queues, &mut progress);
             report_completed_roots(coordinator, &queues, &mut stats, traversal_started);
@@ -213,7 +299,8 @@ pub(super) fn discover_metadata_roots_in_with_callback(
         }
         let results = worker_pool.inspect(jobs);
         for (volume, joined) in results {
-            if coordinator.is_cancel_requested() {
+            if cancelled(coordinator, cancellation.as_deref()) {
+                coordinator.request_cancel();
                 break;
             }
             let Ok(result) = joined else {
@@ -250,21 +337,14 @@ pub(super) fn discover_metadata_roots_in_with_callback(
                     queues[volume].pending.push_front(child);
                 }
             }
-            for (path, evidence) in result.candidates {
-                if !path.starts_with(&traversal_root)
-                    || is_discovery_path_excluded(&path, &traversal_root, &excluded_roots)
+            for hit in result.candidates {
+                if !hit.path.starts_with(&traversal_root)
+                    || is_discovery_path_excluded(&hit.path, &traversal_root, &excluded_roots)
                 {
                     progress.skipped = progress.skipped.saturating_add(1);
                     continue;
                 }
-                submit_candidate(
-                    coordinator,
-                    path,
-                    evidence,
-                    RootDiscoveryStrategy::MetadataTraversal,
-                    agents,
-                    on_candidate,
-                );
+                on_hit(hit);
             }
         }
         mark_completed_queues(&mut queues, &mut progress);
@@ -366,25 +446,38 @@ fn report_completed_roots(
 /// 读取一个目录的目录项元数据；此函数没有任何打开普通文件的入口。
 fn inspect_directory_metadata(
     mut cursor: DirectoryCursor,
-    agents: RootDiscoveryAgentScope,
+    probe: DirectoryProbe,
     coordinator: &RootDiscoveryCoordinator,
+    cancellation: Option<&dyn CancellationSignal>,
+    boundary: Option<(&Path, &[PathBuf])>,
 ) -> DirectoryResult {
     let mut result = DirectoryResult {
         started_now: !cursor.started(),
         ..Default::default()
     };
-    if !crate::readers::glm::path_rules::is_allowed_glm_discovery_directory(cursor.path()) {
+    if matches!(probe, DirectoryProbe::Physical(_))
+        && !crate::readers::glm::path_rules::is_allowed_glm_discovery_directory(cursor.path())
+    {
         return result;
     }
-    if coordinator.is_cancel_requested() {
+    if cancelled(coordinator, cancellation) {
         return result;
     }
     if is_obviously_network_path(cursor.path()) {
         result.skipped = 1;
         return result;
     }
+    if let DirectoryProbe::Workbuddy(edition) = probe
+        && result.started_now
+        && let Some(root) = workbuddy_home_for_projects(cursor.path(), edition)
+    {
+        result.candidates.push(DirectoryHit {
+            path: root.to_path_buf(),
+            evidence: None,
+        });
+    }
     for _ in 0..DIRECTORY_CHUNK_ENTRIES {
-        if coordinator.is_cancel_requested() {
+        if cancelled(coordinator, cancellation) {
             return result;
         }
         let entry = match cursor.next_entry() {
@@ -403,11 +496,17 @@ fn inspect_directory_metadata(
             }
         };
         let path = entry.path();
-        if is_unselected_agent_directory(&path, agents) {
+        if boundary
+            .is_some_and(|(root, excluded)| is_discovery_path_excluded(&path, root, excluded))
+        {
             result.skipped += 1;
             continue;
         }
-        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        if outside_probe_source_scope(&path, probe) {
+            result.skipped += 1;
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
             result.io_errors += 1;
             continue;
         };
@@ -419,11 +518,42 @@ fn inspect_directory_metadata(
             result.children.push(cursor.child(path));
         } else if metadata.is_file() {
             result.file_names_checked += 1;
-            if let Some(candidate) = candidate_from_file_name(&path, agents) {
-                result.candidates.push(candidate);
+            if let DirectoryProbe::Physical(agents) = probe
+                && let Some((path, evidence)) = candidate_from_file_name(&path, agents)
+            {
+                result.candidates.push(DirectoryHit {
+                    path,
+                    evidence: Some(evidence),
+                });
             }
         }
     }
     result.continuation = Some(cursor);
     result
+}
+
+/// 只有所选版本名下的普通 projects 目录才能产生 WorkBuddy 源根。
+fn workbuddy_home_for_projects(path: &Path, edition: WorkbuddyEdition) -> Option<&Path> {
+    let home = path.parent()?;
+    (matches_workbuddy_directory_name(path, WORKBUDDY_PROJECTS_DIR_NAME)
+        && edition.matches_directory(home))
+    .then_some(home)
+}
+
+/// 在打开目录元数据前跳过未选客户端或另一 WorkBuddy 版本的私有来源树。
+fn outside_probe_source_scope(path: &Path, probe: DirectoryProbe) -> bool {
+    match probe {
+        DirectoryProbe::Physical(agents) => is_unselected_agent_directory(path, agents),
+        DirectoryProbe::Workbuddy(edition) => WorkbuddyEdition::ALL
+            .into_iter()
+            .any(|other| other != edition && other.matches_directory(path)),
+    }
+}
+
+/// 同时响应发现面板与 WorkBuddy 索引宿主的协作取消。
+fn cancelled(
+    coordinator: &RootDiscoveryCoordinator,
+    cancellation: Option<&dyn CancellationSignal>,
+) -> bool {
+    cancellation.is_some_and(CancellationSignal::is_cancelled) || coordinator.is_cancel_requested()
 }

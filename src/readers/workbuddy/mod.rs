@@ -1,4 +1,7 @@
 //! WorkBuddy 固定本机布局的只读用量与 Trace 投影。
+pub(crate) mod discovery;
+/// 分版本元数据发现入口，供不需要 SQLite 的原生调用者使用。
+pub use discovery::discover_edition_sources as discover_workbuddy_edition_sources;
 pub(crate) mod jsonl;
 pub(crate) mod projects;
 use self::jsonl::{open_fixed_prefix, read_project_usage};
@@ -204,10 +207,10 @@ where
         return Vec::new();
     }
     let traces_dir = workbuddy_home.join(WORKBUDDY_TRACES_DIR_NAME);
-    let Ok(metadata) = fs::symlink_metadata(&traces_dir) else {
-        return Vec::new();
-    };
-    if crate::readers::metadata_is_link_like(&metadata) || !metadata.is_dir() {
+    if crate::readers::classify_local_path(&traces_dir)
+        != crate::readers::LocalPathStatus::ConfirmedLocal
+        || crate::readers::validate_local_plain_directory(&traces_dir).is_err()
+    {
         return Vec::new();
     }
     let mut remaining_entries = MAX_TRACE_DIRECTORY_ENTRIES;

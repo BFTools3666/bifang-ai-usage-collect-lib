@@ -2,6 +2,49 @@
 
 use super::*;
 
+/// 发现计数反映整轮实际命中，确认或遇到已登记根时不能倒退。
+#[test]
+fn found_count_keeps_confirmed_roots_and_resets_for_the_next_run() {
+    let coordinator = RootDiscoveryCoordinator::default();
+    let start = || {
+        coordinator.start(
+            RootDiscoveryStrategy::MetadataTraversal,
+            RootDiscoveryPlatform::Other,
+            RootDiscoveryScope::FullLocalVolumes,
+            2,
+        )
+    };
+    assert!(start());
+    let candidate = RootCandidate {
+        id: "first-root".to_owned(),
+        client: SourceClientKind::Codex,
+        absolute_path: std::path::PathBuf::from("/fixture/first"),
+        strategy: RootDiscoveryStrategy::MetadataTraversal,
+        evidence: RootCandidateEvidence::CodexRollout,
+    };
+    let another = RootCandidate {
+        id: "second-root".to_owned(),
+        absolute_path: std::path::PathBuf::from("/fixture/second"),
+        ..candidate.clone()
+    };
+    assert!(coordinator.submit_candidate(candidate.clone()));
+    assert!(coordinator.submit_candidate(another.clone()));
+    coordinator.remove_candidates(std::slice::from_ref(&candidate.id));
+    assert_eq!(coordinator.candidates(), vec![another]);
+    assert!(!coordinator.submit_candidate(candidate.clone()));
+    assert_eq!(
+        coordinator.select_candidates(std::slice::from_ref(&candidate.id)),
+        Err(RootCandidateSelectionError::UnknownCandidate)
+    );
+    coordinator.update_progress(RootDiscoveryProgress::default());
+    coordinator.finish(false, true);
+    assert_eq!(coordinator.snapshot().progress.candidates_found, 2);
+    assert_eq!(coordinator.pulse().candidates_found, 2);
+    assert!(start());
+    assert_eq!(coordinator.snapshot().progress.candidates_found, 0);
+    assert!(coordinator.submit_candidate(candidate));
+}
+
 /// 系统索引阶段的分页计数立即体现在进度里，且只在 Running 时累加。
 #[test]
 fn index_file_names_advance_progress_only_while_running() {

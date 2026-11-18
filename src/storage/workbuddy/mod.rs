@@ -1,4 +1,5 @@
-//! WorkBuddy 独立派生数据库：按完整行增量提交两根统计，不接管其他产品数据库。
+//! WorkBuddy 独立派生数据库：按完整行增量提交统计，保持版本间隔离。
+mod edition;
 mod schema;
 mod snapshot;
 mod source;
@@ -7,7 +8,7 @@ mod tests;
 
 use crate::{
     CancellationSignal, CoverageReport, CoverageState, LocalError, LocalErrorKind,
-    WorkbuddyScanSource,
+    WorkbuddyEdition, WorkbuddyScanSource,
 };
 use schema::statement;
 use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
@@ -18,6 +19,7 @@ use std::{collections::BTreeMap, path::Path};
 /// 一份独立 WorkBuddy 派生库连接，所有写入由宿主单一 writer 持有。
 pub struct WorkbuddyIndex {
     connection: DatabaseConnection,
+    edition: Option<WorkbuddyEdition>,
 }
 impl std::fmt::Debug for WorkbuddyIndex {
     /// 不输出数据库路径或连接选项。
@@ -42,6 +44,8 @@ pub enum WorkbuddyRefreshMode {
 /// 增量运行的实际计数，不把枚举或检查当作内容重读。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkbuddyIndexOutcome {
+    /// 本轮发现范围实际命中的独立根数，历史登记根不计入此值。
+    pub roots_discovered: u64,
     /// 本轮枚举到的普通来源文件数。
     pub files_scanned: u64,
     /// 无需重新读取内容的文件数。
@@ -56,11 +60,35 @@ impl WorkbuddyIndex {
     /// # Errors
     /// 路径、权限、格式或数据库错误返回稳定脱敏类别，不覆盖已有库。
     pub async fn open(base_dir: &Path, relative_path: &Path) -> Result<Self, LocalError> {
+        Self::open_database(base_dir, relative_path, None).await
+    }
+
+    /// 按版本打开独立的私有派生数据库和已发现来源 registry。
+    /// # Errors
+    /// 对应版本之外的数据库将拒绝打开，不迁移旧共享库。
+    pub async fn open_edition(
+        base_dir: &Path,
+        edition: WorkbuddyEdition,
+    ) -> Result<Self, LocalError> {
+        Self::open_database(
+            base_dir,
+            Path::new(edition.database_file_name()),
+            Some(edition),
+        )
+        .await
+    }
+
+    /// 共同完成 SQLite 打开、产品身份校验和私有权限设置。
+    async fn open_database(
+        base_dir: &Path,
+        relative_path: &Path,
+        edition: Option<WorkbuddyEdition>,
+    ) -> Result<Self, LocalError> {
         let (connection, path) =
             super::private_sqlite::open_private_sqlite(base_dir, relative_path)
                 .await
                 .map_err(super::map_private_sqlite_error)?;
-        if let Err(error) = schema::ensure_schema(&connection).await {
+        if let Err(error) = schema::ensure_schema(&connection, edition).await {
             let _ = connection.close().await;
             return Err(error);
         }
@@ -68,7 +96,10 @@ impl WorkbuddyIndex {
             .await
             .map_err(super::map_private_sqlite_error)?;
         super::enable_concurrent_snapshot_reads(&connection).await?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            edition,
+        })
     }
 
     /// 从当前用户固定双根更新索引，把来源探测失败纳入快照覆盖状态。
@@ -84,6 +115,9 @@ impl WorkbuddyIndex {
     where
         C: CancellationSignal + Clone + 'static,
     {
+        if self.edition.is_some() {
+            return Err(incompatible_refresh());
+        }
         let Some(user_home) = user_home.map(Path::to_path_buf) else {
             self.record_failure(&[]).await?;
             return Err(source_error());
@@ -122,6 +156,24 @@ impl WorkbuddyIndex {
     where
         C: CancellationSignal + Clone + 'static,
     {
+        if self.edition.is_some() || sources.len() > 2 {
+            return Err(incompatible_refresh());
+        }
+        self.refresh_sources(sources, since_epoch_ms, mode, cancellation)
+            .await
+    }
+
+    /// 对本库已校验来源执行原子索引；失败保留上次计量。
+    async fn refresh_sources<C>(
+        &mut self,
+        sources: &[WorkbuddyScanSource],
+        since_epoch_ms: i64,
+        mode: WorkbuddyRefreshMode,
+        cancellation: C,
+    ) -> Result<WorkbuddyIndexOutcome, LocalError>
+    where
+        C: CancellationSignal + Clone + 'static,
+    {
         let result = self
             .refresh_inner(
                 sources,
@@ -151,6 +203,7 @@ impl WorkbuddyIndex {
             return Err(source_error());
         }
         let known = self.checkpoints().await?;
+        let roots_discovered = sources.len() as u64;
         let sources = sources.to_vec();
         let worker_cancellation = cancellation.clone();
         let prepared = tokio::task::spawn_blocking(move || {
@@ -162,13 +215,21 @@ impl WorkbuddyIndex {
             return Err(source_error());
         }
         let outcome = WorkbuddyIndexOutcome {
+            roots_discovered,
             files_scanned: prepared.files.len() as u64,
             unchanged_files: prepared.files.iter().filter(|file| file.unchanged).count() as u64,
             rebuilt_files: prepared.files.iter().filter(|file| file.rebuilt).count() as u64,
             bytes_read: prepared.bytes_read,
         };
         let transaction = self.connection.begin().await.map_err(database_error)?;
-        let result = Self::publish(&transaction, prepared, since_epoch_ms, &cancellation).await;
+        let result = Self::publish(
+            &transaction,
+            prepared,
+            since_epoch_ms,
+            self.edition.is_some(),
+            &cancellation,
+        )
+        .await;
         match result {
             Ok(()) => {
                 transaction.commit().await.map_err(database_error)?;
@@ -186,6 +247,7 @@ impl WorkbuddyIndex {
         transaction: &sea_orm::DatabaseTransaction,
         prepared: PreparedUpdate,
         since_epoch_ms: i64,
+        has_registry: bool,
         cancellation: &C,
     ) -> Result<(), LocalError> {
         let retained = prepared
@@ -293,6 +355,13 @@ impl WorkbuddyIndex {
             return Err(source_error());
         }
         let root_count = prepared.root_aliases.len() as u64;
+        let root_aliases = if has_registry {
+            Self::mark_indexed_roots(transaction, prepared.root_aliases.keys(), cancellation)
+                .await?;
+            BTreeMap::new()
+        } else {
+            prepared.root_aliases
+        };
         let state = SnapshotState {
             coverage: CoverageReport {
                 state: CoverageState::Complete,
@@ -302,7 +371,7 @@ impl WorkbuddyIndex {
                 skipped_count: 0,
                 warning_count: 0,
             },
-            root_aliases: prepared.root_aliases,
+            root_aliases,
         };
         transaction.execute_raw(statement("INSERT INTO workbuddy_state VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET state_json=excluded.state_json",vec![encode(&state)?.into()])).await.map_err(database_error)?;
         Ok(())
@@ -354,5 +423,13 @@ fn database_error(_: sea_orm::DbErr) -> LocalError {
     LocalError::new(
         LocalErrorKind::Database,
         "workbuddy statistics database operation failed",
+    )
+}
+
+/// 拒绝把指定版本来源错误地刷新到旧库或其他版本。
+fn incompatible_refresh() -> LocalError {
+    LocalError::new(
+        LocalErrorKind::InvalidPath,
+        "workbuddy refresh source scope does not match the database",
     )
 }

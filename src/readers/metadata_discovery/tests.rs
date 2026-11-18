@@ -556,15 +556,23 @@ fn full_discovery_skips_platform_impossible_directories() {
     let temp = tempdir().unwrap();
     let allowed = temp.path().join("Users/demo/.codex/sessions/2026");
     #[cfg(target_os = "windows")]
-    let blocked = temp.path().join("Windows/fake/sessions/2026");
+    let system_name = "windows";
     #[cfg(target_os = "macos")]
-    let blocked = temp.path().join("System/fake/sessions/2026");
+    let system_name = "System";
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let blocked = temp.path().join("proc/fake/sessions/2026");
+    let system_name = "proc";
+    let blocked = temp.path().join(system_name).join("fake/sessions/2026");
+    let nested = temp
+        .path()
+        .join("archives")
+        .join(system_name)
+        .join("second/sessions/2026");
     fs::create_dir_all(&allowed).unwrap();
     fs::create_dir_all(&blocked).unwrap();
+    fs::create_dir_all(&nested).unwrap();
     fs::write(allowed.join("rollout-ok.jsonl"), b"unopened").unwrap();
     fs::write(blocked.join("rollout-skip.jsonl"), b"unopened").unwrap();
+    fs::write(nested.join("rollout-nested.jsonl"), b"unopened").unwrap();
 
     let root = temp.path().to_path_buf();
     let excluded =
@@ -582,12 +590,17 @@ fn full_discovery_skips_platform_impossible_directories() {
         &|_| {},
     );
     let candidates = coordinator.candidates();
-    assert_eq!(candidates.len(), 1);
-    assert!(
-        candidates[0]
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.iter().any(|candidate| {
+        candidate
             .absolute_path
             .components()
             .any(|part| part.as_os_str() == ".codex")
+    }));
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.absolute_path.ends_with("second"))
     );
 }
 

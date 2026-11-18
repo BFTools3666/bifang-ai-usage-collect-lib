@@ -4,6 +4,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(target_os = "linux", test))]
+#[path = "linux_mounts.rs"]
+mod linux_mounts;
+
 /// 汇总可安全遍历的本地卷与必须跳过的挂载点，不包含目录内容。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalVolumeRoots {
@@ -99,7 +103,7 @@ pub fn is_obviously_network_path(path: &Path) -> bool {
 
 /// 枚举当前平台卷；失败时返回空搜索范围并降低覆盖，不退回无边界根扫描。
 pub fn enumerate_local_volume_roots() -> LocalVolumeRoots {
-    let mounts = match whichdisk::list() {
+    let mounts = match platform_mount_roots() {
         Ok(mounts) => mounts,
         Err(_) => {
             return LocalVolumeRoots {
@@ -108,15 +112,13 @@ pub fn enumerate_local_volume_roots() -> LocalVolumeRoots {
             };
         }
     };
-    let platform = current_platform();
     let mut local_candidates = BTreeSet::new();
     let mut excluded_roots = BTreeSet::new();
     let mut network_skipped_count = 0_u64;
     let mut other_skipped_count = 0_u64;
 
-    for mount in mounts {
-        let mount_point = mount.mount_point().to_path_buf();
-        match classify_volume(platform, mount.fs_type()) {
+    for (mount_point, class) in mounts {
+        match class {
             VolumeClass::Local => {
                 local_candidates.insert(mount_point);
             }
@@ -158,6 +160,34 @@ pub fn enumerate_local_volume_roots() -> LocalVolumeRoots {
         network_skipped_count,
         other_skipped_count,
     )
+}
+
+/// Linux mountinfo 是发现闭集的原始事实。保留挂载点字节，不采用 whichdisk 列表的前缀筛选。
+#[cfg(target_os = "linux")]
+fn platform_mount_roots() -> std::io::Result<Vec<(PathBuf, VolumeClass)>> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let mountinfo = fs::read("/proc/self/mountinfo")?;
+    Ok(linux_mounts::parse_mountinfo(&mountinfo)?
+        .into_iter()
+        .map(|(path, class)| (PathBuf::from(OsString::from_vec(path)), class))
+        .collect())
+}
+
+/// Windows 和 macOS 以平台卷元数据的已确认本地挂载为事实。
+#[cfg(not(target_os = "linux"))]
+fn platform_mount_roots() -> std::io::Result<Vec<(PathBuf, VolumeClass)>> {
+    let platform = current_platform();
+    Ok(whichdisk::list()?
+        .into_iter()
+        .map(|mount| {
+            (
+                mount.mount_point().to_path_buf(),
+                classify_volume(platform, mount.fs_type()),
+            )
+        })
+        .collect())
 }
 
 /// 生成最终卷边界；成功但没有任何可确认本地卷时必须降低覆盖而非报告完整。
@@ -203,6 +233,7 @@ fn current_platform() -> VolumePlatform {
 }
 
 /// 根据平台已提供的证明与文件系统类型判断是否允许遍历。
+#[cfg(any(not(target_os = "linux"), test))]
 fn classify_volume(platform: VolumePlatform, fs_type: &str) -> VolumeClass {
     match platform {
         VolumePlatform::Apple | VolumePlatform::Windows => VolumeClass::Local,

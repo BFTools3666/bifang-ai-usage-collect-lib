@@ -1,9 +1,9 @@
-//! WorkBuddy 只读本机来源策略：固定路径与稳定身份推导。
-//! 本模块不探测文件系统；固定来源可进入独立 WorkbuddyIndex，不占用通用物理 Agent 槽位。
+//! WorkBuddy 只读本机来源策略：版本、默认路径与稳定身份推导。
 
 use std::path::{Path, PathBuf};
 
 use crate::{SourceClientKind, path_key, source_root_alias_from_path, stable_id};
+use serde::{Deserialize, Serialize};
 
 /// WorkBuddy 固定安装目录名，位于当前用户主目录下。
 pub const WORKBUDDY_HOME_DIR_NAME: &str = ".workbuddy";
@@ -12,9 +12,58 @@ pub const WORKBUDDY_INTERNATIONAL_HOME_DIR_NAME: &str = ".workbuddy-ai";
 /// WorkBuddy 逐请求项目记录固定目录名，用作可统计结构证据。
 pub const WORKBUDDY_PROJECTS_DIR_NAME: &str = "projects";
 
+/// 独立授权、发现和统计的 WorkBuddy 版本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkbuddyEdition {
+    /// 国内版。
+    Domestic,
+    /// 国际版。
+    International,
+}
+
+impl WorkbuddyEdition {
+    /// 稳定显示和扫描顺序。
+    pub const ALL: [Self; 2] = [Self::Domestic, Self::International];
+
+    /// 识别数据布局的安装目录名。
+    pub const fn directory_name(self) -> &'static str {
+        match self {
+            Self::Domestic => WORKBUDDY_HOME_DIR_NAME,
+            Self::International => WORKBUDDY_INTERNATIONAL_HOME_DIR_NAME,
+        }
+    }
+
+    /// 本产品在其私有目录下使用的独立派生库文件名。
+    pub const fn database_file_name(self) -> &'static str {
+        match self {
+            Self::Domestic => "workbuddy-domestic.db",
+            Self::International => "workbuddy-international.db",
+        }
+    }
+
+    /// 只按完整目录名识别版本，兼容 Windows 与常见 macOS 大小写规则。
+    pub(crate) fn matches_directory(self, path: &Path) -> bool {
+        matches_workbuddy_directory_name(path, self.directory_name())
+    }
+}
+
+/// 按目标平台的目录匹配规则核对 WorkBuddy 的固定布局组件。
+pub(crate) fn matches_workbuddy_directory_name(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            if cfg!(any(target_os = "windows", target_os = "macos")) {
+                name.eq_ignore_ascii_case(expected)
+            } else {
+                name == expected
+            }
+        })
+}
+
 /// GUI adapter 已确认存在的 WorkBuddy 只读本机来源。
 ///
-/// 类型名为兼容既有 DTO 保留；该来源使用固定双根增量库，不接受 GUI 手动扩展根。
+/// 路径只供原生进程打开来源，显示层应使用别名与稳定标识。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkbuddyScanSource {
     /// 稳定根 ID，前缀为 `workbuddy-root-`。

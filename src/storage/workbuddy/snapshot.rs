@@ -37,11 +37,20 @@ impl WorkbuddyIndex {
         if quality.invalid_record_count > 0 || quality.conflicting_duplicate_record_count > 0 {
             return Err(source_error());
         }
+        let root_aliases = if self.edition.is_some() {
+            self.sources_on(&transaction, true)
+                .await?
+                .into_iter()
+                .map(|(source, _)| (source.root_id, source.alias))
+                .collect()
+        } else {
+            state.root_aliases
+        };
         transaction.rollback().await.map_err(database_error)?;
         Ok(Some(WorkbuddyUsageInputs {
             records,
             coverage: state.coverage,
-            root_aliases: state.root_aliases,
+            root_aliases,
         }))
     }
     /// 在调用者当前事务中读取唯一发布状态。
