@@ -68,14 +68,59 @@ pub fn classify_local_path(path: &Path) -> LocalPathStatus {
         return LocalPathStatus::RejectedNetwork;
     }
     match whichdisk::resolve(path) {
-        Ok(location) => match classify_resolved_volume(current_platform(), location.fs_type()) {
-            VolumeClass::Local => LocalPathStatus::ConfirmedLocal,
-            VolumeClass::Network => LocalPathStatus::RejectedNetwork,
-            VolumeClass::Unknown => LocalPathStatus::Indeterminate,
-        },
+        Ok(location) => {
+            let class = classify_resolved_volume(current_platform(), location.fs_type());
+            #[cfg(target_os = "windows")]
+            let class = verify_windows_resolved_volume(
+                class,
+                location.canonical_path(),
+                location.mount_point(),
+                location.device(),
+            );
+            match class {
+                VolumeClass::Local => LocalPathStatus::ConfirmedLocal,
+                VolumeClass::Network => LocalPathStatus::RejectedNetwork,
+                VolumeClass::Unknown => LocalPathStatus::Indeterminate,
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => LocalPathStatus::Missing,
         Err(_) => LocalPathStatus::Indeterminate,
     }
+}
+
+/// Windows 盘符可能解析到共享目录。只有系统返回本地卷 GUID 才接受本地文件系统类型。
+#[cfg(target_os = "windows")]
+fn verify_windows_resolved_volume(
+    class: VolumeClass,
+    canonical: &Path,
+    mount_point: &Path,
+    device: &std::ffi::OsStr,
+) -> VolumeClass {
+    if is_obviously_network_path(canonical) || is_obviously_network_path(mount_point) {
+        return VolumeClass::Network;
+    }
+    // whichdisk 在卷 GUID 查询失败时把挂载点本身用作设备名，不能将这个回退视为本地卷证明。
+    let guid = device
+        .to_str()
+        .and_then(|device| device.strip_prefix(r"\\?\Volume{"))
+        .and_then(|device| device.strip_suffix("}\\"));
+    if class == VolumeClass::Local && !guid.is_some_and(is_windows_volume_guid) {
+        return VolumeClass::Unknown;
+    }
+    class
+}
+
+/// 核验 Windows 卷设备命名空间中的 GUID 格式。
+#[cfg(target_os = "windows")]
+fn is_windows_volume_guid(guid: &str) -> bool {
+    guid.len() == 36
+        && guid.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
 }
 
 /// 先用纯路径规则拒绝不会触发文件系统访问的 UNC 与常见网络挂载入口。
@@ -404,6 +449,46 @@ mod tests {
             classify_resolved_volume(VolumePlatform::Windows, "NTFS"),
             VolumeClass::Local
         );
+    }
+
+    /// 已解析的 Windows UNC 和缺少卷 GUID 的盘符不能仅凭 NTFS 类型获得本地读取权限。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_resolved_paths_require_non_unc_canonical_path_and_volume_guid() {
+        use std::ffi::OsStr;
+
+        let drive = Path::new(r"C:\");
+        let canonical = Path::new(r"\\?\C:\test");
+        let guid = OsStr::new(r"\\?\Volume{12345678-1234-abcd-1234-1234567890ab}\");
+        assert_eq!(
+            verify_windows_resolved_volume(VolumeClass::Local, canonical, drive, guid),
+            VolumeClass::Local
+        );
+        assert_eq!(
+            verify_windows_resolved_volume(VolumeClass::Local, canonical, drive, drive.as_os_str()),
+            VolumeClass::Unknown
+        );
+        let unc = Path::new(r"\\?\UNC\server\share\test");
+        assert_eq!(
+            verify_windows_resolved_volume(VolumeClass::Local, unc, drive, guid),
+            VolumeClass::Network
+        );
+        assert_eq!(
+            verify_windows_resolved_volume(VolumeClass::Local, canonical, unc, guid),
+            VolumeClass::Network
+        );
+    }
+
+    /// 当前 Windows 主机的实际临时目录和普通文件仍可通过卷证明确认为本地。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_current_local_drive_passes_exact_path_classification() {
+        let dir = tempfile::tempdir().expect("temporary local directory");
+        let file = dir.path().join("source.jsonl");
+        fs::write(&file, b"{}\n").expect("temporary local file");
+        for path in [dir.path(), file.as_path()] {
+            assert_eq!(classify_local_path(path), LocalPathStatus::ConfirmedLocal);
+        }
     }
 
     /// 验证纯路径预检在访问文件系统前拒绝常见网络挂载入口。
