@@ -11,12 +11,10 @@ use jiff::Timestamp;
 use serde::Deserialize;
 
 use crate::readers::jsonl_lines::{JsonlRecord, LineFlow, cancelled_io_error, read_jsonl_records};
-use crate::readers::{
-    DEFAULT_MAX_JSONL_LINE_BYTES, metadata_is_link_like, same_opened_file,
-    walk_ancestors_for_link_component,
-};
+use crate::readers::{DEFAULT_MAX_JSONL_LINE_BYTES, metadata_is_link_like, same_opened_file};
 
 use super::projects::{WorkbuddyProjectFile, discover_project_files};
+use super::source_boundary::{HOST_SOURCE_BOUNDARY, WorkbuddySourceBoundary};
 use super::{WorkbuddyCancellation, WorkbuddyReadError};
 
 /// 单次读取允许消耗的 project JSONL 总字节数。
@@ -197,14 +195,31 @@ pub(crate) fn read_project_usage<C: WorkbuddyCancellation + ?Sized>(
 
 /// 打开普通文件、复核链接与句柄身份，并冻结本轮只读长度。
 pub(crate) fn open_fixed_prefix(path: &Path) -> std::io::Result<(File, u64)> {
-    let file = File::open(path)?;
-    let opened_metadata = file.metadata()?;
-    if !opened_metadata.is_file() || walk_ancestors_for_link_component(path)? {
+    open_fixed_prefix_with_boundary(path, HOST_SOURCE_BOUNDARY)
+}
+
+/// 打开前拒绝未知卷和链接，读取前再次复核路径和打开句柄。
+pub(super) fn open_fixed_prefix_with_boundary(
+    path: &Path,
+    boundary: WorkbuddySourceBoundary,
+) -> std::io::Result<(File, u64)> {
+    boundary.check(path)?;
+    let before = fs::symlink_metadata(path)?;
+    if !before.is_file() || metadata_is_link_like(&before) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "unsupported WorkBuddy source",
         ));
     }
+    let file = File::open(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported WorkBuddy source",
+        ));
+    }
+    boundary.check(path)?;
     let current_metadata = fs::symlink_metadata(path)?;
     if metadata_is_link_like(&current_metadata)
         || !current_metadata.is_file()

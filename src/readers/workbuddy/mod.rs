@@ -4,8 +4,12 @@ pub(crate) mod discovery;
 pub use discovery::discover_edition_sources as discover_workbuddy_edition_sources;
 pub(crate) mod jsonl;
 pub(crate) mod projects;
-use self::jsonl::{open_fixed_prefix, read_project_usage};
+mod source_boundary;
+#[cfg(test)]
+mod source_boundary_tests;
+use self::jsonl::{open_fixed_prefix_with_boundary, read_project_usage};
 use self::projects::{WorkbuddyProjectFiles, discover_project_files};
+use self::source_boundary::{HOST_SOURCE_BOUNDARY, WorkbuddySourceBoundary};
 /// 与其他来源共用宿主取消协议，保留原路径作为兼容名称。
 pub use crate::CancellationSignal as WorkbuddyCancellation;
 use crate::readers::jsonl_lines::{CancellableRead, cancelled_io_error};
@@ -203,19 +207,25 @@ pub fn read_traces_with_cancellation<C>(
 where
     C: WorkbuddyCancellation + ?Sized,
 {
+    read_traces_with_boundary(workbuddy_home, cancellation, HOST_SOURCE_BOUNDARY)
+}
+
+/// 在每层 Trace 目录和候选文件上复核本地边界。
+fn read_traces_with_boundary<C>(
+    workbuddy_home: &Path,
+    cancellation: &C,
+    boundary: WorkbuddySourceBoundary,
+) -> Vec<WorkbuddyTraceRecord>
+where
+    C: WorkbuddyCancellation + ?Sized,
+{
     if cancellation.is_cancelled() {
         return Vec::new();
     }
     let traces_dir = workbuddy_home.join(WORKBUDDY_TRACES_DIR_NAME);
-    if crate::readers::classify_local_path(&traces_dir)
-        != crate::readers::LocalPathStatus::ConfirmedLocal
-        || crate::readers::validate_local_plain_directory(&traces_dir).is_err()
-    {
-        return Vec::new();
-    }
     let mut remaining_entries = MAX_TRACE_DIRECTORY_ENTRIES;
     let Ok(mut pid_entries) =
-        sorted_entries_with_cancellation(&traces_dir, &mut remaining_entries, cancellation)
+        sorted_entries_with_boundary(&traces_dir, &mut remaining_entries, cancellation, boundary)
     else {
         return Vec::new();
     };
@@ -236,7 +246,7 @@ where
             return records;
         }
         let Ok(file_entries) =
-            sorted_entries_with_cancellation(&pid_path, &mut remaining_entries, cancellation)
+            sorted_entries_with_boundary(&pid_path, &mut remaining_entries, cancellation, boundary)
         else {
             continue;
         };
@@ -252,7 +262,7 @@ where
                 continue;
             }
             let Some((record, consumed)) =
-                read_trace_file_with_cancellation(&path, remaining_bytes, cancellation)
+                read_trace_file_with_boundary(&path, remaining_bytes, cancellation, boundary)
             else {
                 continue;
             };
@@ -272,9 +282,28 @@ pub fn sorted_entries_with_cancellation<C>(
 where
     C: WorkbuddyCancellation + ?Sized,
 {
+    sorted_entries_with_boundary(
+        directory,
+        remaining_entries,
+        cancellation,
+        HOST_SOURCE_BOUNDARY,
+    )
+}
+
+/// 核验当前目录的实际卷后按文件名排序，仅消费可用的目录项预算。
+fn sorted_entries_with_boundary<C>(
+    directory: &Path,
+    remaining_entries: &mut usize,
+    cancellation: &C,
+    boundary: WorkbuddySourceBoundary,
+) -> std::io::Result<Vec<fs::DirEntry>>
+where
+    C: WorkbuddyCancellation + ?Sized,
+{
     if cancellation.is_cancelled() {
         return Err(cancelled_io_error());
     }
+    boundary.check(directory)?;
     let mut entries = Vec::new();
     for entry in fs::read_dir(directory)? {
         if cancellation.is_cancelled() {
@@ -299,10 +328,23 @@ pub fn read_trace_file_with_cancellation<C>(
 where
     C: WorkbuddyCancellation + ?Sized,
 {
+    read_trace_file_with_boundary(path, remaining_bytes, cancellation, HOST_SOURCE_BOUNDARY)
+}
+
+/// 在读取 Trace 文件前核验该文件仍处于本地持久卷。
+fn read_trace_file_with_boundary<C>(
+    path: &Path,
+    remaining_bytes: u64,
+    cancellation: &C,
+    boundary: WorkbuddySourceBoundary,
+) -> Option<(WorkbuddyTraceRecord, u64)>
+where
+    C: WorkbuddyCancellation + ?Sized,
+{
     if cancellation.is_cancelled() {
         return None;
     }
-    let (file, observed_len) = open_fixed_prefix(path).ok()?;
+    let (file, observed_len) = open_fixed_prefix_with_boundary(path, boundary).ok()?;
     if observed_len == 0 || observed_len > MAX_TRACE_FILE_BYTES || observed_len > remaining_bytes {
         return None;
     }

@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::{WORKBUDDY_PROJECTS_DIR_NAME, WorkbuddyUsageOrigin};
 
-use crate::readers::{metadata_is_link_like, walk_ancestors_for_link_component};
+use crate::readers::metadata_is_link_like;
 
+use super::source_boundary::{HOST_SOURCE_BOUNDARY, WorkbuddySourceBoundary};
 use super::{WorkbuddyCancellation, WorkbuddyReadError};
 
 /// 单次读取最多处理的项目目录数。
@@ -58,20 +59,32 @@ pub(crate) fn discover_project_files<C: WorkbuddyCancellation + ?Sized>(
     workbuddy_home: &Path,
     cancellation: &C,
 ) -> Result<WorkbuddyProjectFiles, WorkbuddyReadError> {
+    discover_project_files_with_boundary(workbuddy_home, cancellation, HOST_SOURCE_BOUNDARY)
+}
+
+/// 发现项目和子代理文件时不得越过未获准的卷边界。
+pub(super) fn discover_project_files_with_boundary<C: WorkbuddyCancellation + ?Sized>(
+    workbuddy_home: &Path,
+    cancellation: &C,
+    boundary: WorkbuddySourceBoundary,
+) -> Result<WorkbuddyProjectFiles, WorkbuddyReadError> {
     ensure_not_cancelled(cancellation)?;
     let projects_root = workbuddy_home.join(WORKBUDDY_PROJECTS_DIR_NAME);
+    boundary.check(&projects_root).map_err(map_root_error)?;
     let metadata = fs::symlink_metadata(&projects_root).map_err(map_root_error)?;
-    if metadata_is_link_like(&metadata)
-        || !metadata.is_dir()
-        || walk_ancestors_for_link_component(&projects_root).unwrap_or(true)
-    {
+    if metadata_is_link_like(&metadata) || !metadata.is_dir() {
         return Err(WorkbuddyReadError::Read);
     }
 
     let mut result = WorkbuddyProjectFiles::default();
     let mut entry_budget = MAX_DIRECTORY_ENTRIES;
-    let project_entries =
-        read_sorted_entries(&projects_root, &mut result, &mut entry_budget, cancellation)?;
+    let project_entries = read_sorted_entries(
+        &projects_root,
+        &mut result,
+        &mut entry_budget,
+        cancellation,
+        boundary,
+    )?;
     let mut project_count = 0_usize;
     for project_entry in project_entries {
         ensure_not_cancelled(cancellation)?;
@@ -93,6 +106,7 @@ pub(crate) fn discover_project_files<C: WorkbuddyCancellation + ?Sized>(
             &mut result,
             &mut entry_budget,
             cancellation,
+            boundary,
         )?;
     }
     result
@@ -108,8 +122,9 @@ fn enumerate_project<C: WorkbuddyCancellation + ?Sized>(
     result: &mut WorkbuddyProjectFiles,
     entry_budget: &mut usize,
     cancellation: &C,
+    boundary: WorkbuddySourceBoundary,
 ) -> Result<(), WorkbuddyReadError> {
-    let entries = read_sorted_entries(project_dir, result, entry_budget, cancellation)?;
+    let entries = read_sorted_entries(project_dir, result, entry_budget, cancellation, boundary)?;
     for entry in entries {
         ensure_not_cancelled(cancellation)?;
         if result.files.len() >= MAX_TRANSCRIPT_FILES {
@@ -135,11 +150,23 @@ fn enumerate_project<C: WorkbuddyCancellation + ?Sized>(
                 project_name,
                 WorkbuddyUsageOrigin::TopLevel,
                 result,
+                boundary,
             );
             continue;
         }
         if metadata.is_dir() {
-            enumerate_subagents(&path, project_name, result, entry_budget, cancellation)?;
+            if let Err(error) = boundary.check(&path) {
+                count_io_error(&error, result);
+                continue;
+            }
+            enumerate_subagents(
+                &path,
+                project_name,
+                result,
+                entry_budget,
+                cancellation,
+                boundary,
+            )?;
         }
     }
     Ok(())
@@ -152,6 +179,7 @@ fn enumerate_subagents<C: WorkbuddyCancellation + ?Sized>(
     result: &mut WorkbuddyProjectFiles,
     entry_budget: &mut usize,
     cancellation: &C,
+    boundary: WorkbuddySourceBoundary,
 ) -> Result<(), WorkbuddyReadError> {
     let Some(session_name) = session_dir.file_name().and_then(|name| name.to_str()) else {
         result.skipped_count = result.skipped_count.saturating_add(1);
@@ -170,7 +198,8 @@ fn enumerate_subagents<C: WorkbuddyCancellation + ?Sized>(
         result.skipped_count = result.skipped_count.saturating_add(1);
         return Ok(());
     }
-    let entries = read_sorted_entries(&subagents_dir, result, entry_budget, cancellation)?;
+    let entries =
+        read_sorted_entries(&subagents_dir, result, entry_budget, cancellation, boundary)?;
     for entry in entries {
         ensure_not_cancelled(cancellation)?;
         if result.files.len() >= MAX_TRANSCRIPT_FILES {
@@ -204,6 +233,7 @@ fn enumerate_subagents<C: WorkbuddyCancellation + ?Sized>(
             project_name,
             WorkbuddyUsageOrigin::Subagent,
             result,
+            boundary,
         );
     }
     Ok(())
@@ -216,9 +246,10 @@ fn push_file(
     project_key_material: &str,
     origin: WorkbuddyUsageOrigin,
     result: &mut WorkbuddyProjectFiles,
+    boundary: WorkbuddySourceBoundary,
 ) {
-    if walk_ancestors_for_link_component(&path).unwrap_or(true) {
-        result.skipped_count = result.skipped_count.saturating_add(1);
+    if let Err(error) = boundary.check(&path) {
+        count_io_error(&error, result);
         return;
     }
     match origin {
@@ -243,12 +274,16 @@ fn read_sorted_entries<C: WorkbuddyCancellation + ?Sized>(
     result: &mut WorkbuddyProjectFiles,
     entry_budget: &mut usize,
     cancellation: &C,
+    boundary: WorkbuddySourceBoundary,
 ) -> Result<Vec<DirEntry>, WorkbuddyReadError> {
     ensure_not_cancelled(cancellation)?;
-    let entries = fs::read_dir(directory).map_err(|error| {
-        count_io_error(&error, result);
-        WorkbuddyReadError::Read
-    })?;
+    let entries = boundary
+        .check(directory)
+        .and_then(|()| fs::read_dir(directory))
+        .map_err(|error| {
+            count_io_error(&error, result);
+            WorkbuddyReadError::Read
+        })?;
     let mut values = Vec::new();
     for entry in entries {
         ensure_not_cancelled(cancellation)?;
