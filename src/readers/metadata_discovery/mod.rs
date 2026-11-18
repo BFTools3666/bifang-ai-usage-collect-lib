@@ -465,6 +465,8 @@ fn submit_candidate(
 #[cfg(test)]
 use scope::priority_queue;
 #[cfg(test)]
+mod grok_priority_tests;
+#[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
 mod tests;
