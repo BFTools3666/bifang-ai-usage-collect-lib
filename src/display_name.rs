@@ -111,9 +111,7 @@ mod tests {
     /// 验证 Claude 编码目录只提取最后一个安全项目段。
     fn claude_encoded_directory_uses_final_segment() {
         assert_eq!(
-            claude_project_display_label(
-                "-Users-example-Documents-projects-sample_project"
-            ),
+            claude_project_display_label("-Users-example-Documents-projects-sample_project"),
             Some("sample_project".to_owned())
         );
         assert_eq!(
