@@ -139,4 +139,3 @@ fn take<'a>(bytes: &mut &'a [u8], size: usize) -> Result<&'a [u8], LocalError> {
 fn invalid() -> LocalError {
     LocalError::new(LocalErrorKind::InvalidUsage, "antigravity usage metadata is invalid")
 }
-
