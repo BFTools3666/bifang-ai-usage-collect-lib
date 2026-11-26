@@ -9,6 +9,13 @@ use super::claude_desktop_agent_home::claude_desktop_agent_home_alias_from_path;
 /// Claude Desktop 为每个本地 Agent 会话单独创建一个 `.claude` 数据根，若按目录名
 /// 命名会出现多个无法区分的 `.claude`，因此这里必须先按固定布局识别会话根。
 pub fn source_root_alias_from_path(path: &Path, source_client: SourceClientKind) -> String {
+    if source_client == SourceClientKind::Antigravity {
+        return if path.parent().and_then(Path::file_name).is_some_and(|name| name == "antigravity-cli") {
+            "Antigravity CLI".to_owned()
+        } else {
+            "Antigravity".to_owned()
+        };
+    }
     if source_client == SourceClientKind::ClaudeCode
         && let Some(alias) = claude_desktop_agent_home_alias_from_path(path)
     {

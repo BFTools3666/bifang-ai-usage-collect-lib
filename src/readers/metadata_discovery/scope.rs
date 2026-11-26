@@ -142,6 +142,7 @@ pub(super) fn is_unselected_agent_directory(path: &Path, agents: RootDiscoveryAg
             ".claude" => SourceClientKind::ClaudeCode,
             ".grok" => SourceClientKind::GrokBuildCli,
             ".zcode" => SourceClientKind::Glm,
+            "antigravity" | "antigravity-cli" => SourceClientKind::Antigravity,
             _ => return false,
         }
     };
@@ -172,6 +173,12 @@ pub(super) fn candidate_from_file_name(
         return None;
     }
     let name = path.file_name()?.to_str()?;
+    if agents.contains(SourceClientKind::Antigravity)
+        && super::super::antigravity::discovery::is_conversation_root(parent)
+        && super::super::antigravity::discovery::is_conversation_file_name(name)
+    {
+        return Some((parent.to_path_buf(), RootCandidateEvidence::AntigravityConversationDb));
+    }
     if agents.contains(SourceClientKind::Glm)
         && name == "db.sqlite"
         && crate::readers::glm::path_rules::is_glm_database_root(parent)

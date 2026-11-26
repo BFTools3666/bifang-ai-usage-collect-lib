@@ -12,6 +12,7 @@ pub(super) fn agent_label(client: SourceClientKind) -> Result<&'static str, Loca
         SourceClientKind::ClaudeCode => Ok("claude"),
         SourceClientKind::GrokBuildCli => Ok("grok"),
         SourceClientKind::Glm => Ok("glm"),
+        SourceClientKind::Antigravity => Ok("antigravity"),
         SourceClientKind::WorkBuddy => Err(mismatch()),
     }
 }

@@ -72,6 +72,8 @@ pub enum RootCandidateEvidence {
     GrokSessionUpdates,
     /// rollout 根下 `model-io-sess_*.jsonl` 模型 I/O 用量文件。
     GlmModelIoUpdates,
+    /// `conversations/<UUID>.db` 中的 SQLite 会话计量。
+    AntigravityConversationDb,
 }
 
 /// 发现阶段产生的待确认候选，可由统计库保存并恢复。

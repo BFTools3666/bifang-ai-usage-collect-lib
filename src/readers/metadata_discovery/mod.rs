@@ -255,6 +255,7 @@ fn inspect_explicit_environment_candidates(
         .then_some(grok_home)
         .flatten()
         .filter(|path| path.is_absolute());
+    let antigravity_home_dir = agents.contains(SourceClientKind::Antigravity).then(|| home_dir.clone()).flatten();
     let glm_home_dir = agents
         .contains(SourceClientKind::Glm)
         .then(|| home_dir.clone())
@@ -329,6 +330,12 @@ fn inspect_explicit_environment_candidates(
     });
 
     let mut inspection = ExplicitEnvironmentInspection::default();
+    if let Some(home_dir) = antigravity_home_dir {
+        let result = super::antigravity::discover_antigravity_quick(
+            &super::antigravity::AntigravityDiscoveryInputs { home_dir: Some(home_dir), registered_roots: Vec::new() }, cancellation);
+        merge_coverage(&mut inspection, &result.coverage);
+        inspection.candidates.extend(result.roots.into_iter().map(|root| (root.path, root.evidence)));
+    }
     if let Some(result) = codex_result {
         merge_coverage(&mut inspection, &result.coverage);
         inspection.candidates.extend(
@@ -445,6 +452,7 @@ fn submit_candidate(
         }
         RootCandidateEvidence::GrokSessionUpdates => SourceClientKind::GrokBuildCli,
         RootCandidateEvidence::GlmModelIoUpdates => SourceClientKind::Glm,
+        RootCandidateEvidence::AntigravityConversationDb => SourceClientKind::Antigravity,
     };
     if !agents.contains(client) {
         return;
@@ -472,3 +480,5 @@ mod lifecycle_tests;
 mod tests;
 #[cfg(test)]
 mod zcode_tests;
+#[cfg(test)]
+mod antigravity_tests;

@@ -1,6 +1,6 @@
 # AI 用量扫描与统计
 
-独立 Rust 依赖包，提供 Codex、Claude Code、Grok、ZCode 和 WorkBuddy 本机用量的只读获取，以及 Token 校验、规范化、去重和通用统计。最低 Rust 为 1.95，edition 为 2024。
+独立 Rust 依赖包，提供 Codex、Claude Code、Grok、ZCode、Antigravity 和 WorkBuddy 本机用量的只读获取，以及 Token 校验、规范化、去重和通用统计。最低 Rust 为 1.95，edition 为 2024。
 
 ## 快速接入
 
@@ -66,6 +66,12 @@ let aggregate = aggregate_canonical_usage(&canonical)?;
 统计存储初始化空库或打开当前格式库；应用标识与 Agent 均匹配的更旧版本库先以私有 ZIP 原地备份，再删除重建，不导入旧统计。未知业务库、无格式标识或更新版本库拒绝接管。GUI 在产品数据目录下分别传入 `codex.db`、`claude.db`、`grok.db`、`glm.db`；旧路径文件保持忽略；重建后的统计由下一次扫描建立，备份文件不会自动清理。每个 Agent 库共同保存发现候选、确认根及扫描位置、扫描状态、来源 checkpoint、调用和累计快照。候选可跨连接和进程恢复，确认登记与移除候选在同一事务内完成；宿主必须先持久化本轮候选再发布发现终态，取消时保留已发现位置并保守报告覆盖。
 
 GUI 的 `gui-settings.sqlite3`、账号会话库和身份锚不属于本包；误传 GUI 业务数据库会被拒绝。保留策略、跨库联合视图和业务调度仍由客户端决定。
+
+## Antigravity 会话数据库
+
+`readers::antigravity` 识别 App / CLI 的 `conversations/<UUID>.db` 布局，发现与 protobuf 计量解码不依赖 `storage`。启用 `storage` 后，`AntigravityUsageDatabase` 分页读取一致的只读 SQLite / WAL 快照；`LocalIndex::index_antigravity_database` 在调用方拥有的扫描事务内替换单个会话 generation，主文件和 WAL 未变化时复用检查点。使用独立的 `SourceClientKind::Antigravity` 和 `ProviderKind::AntigravityConversationDb`，不复用其他 Agent 的统计库。
+
+Antigravity 的普通输入不含缓存读取，解析后两者合为 `input_tokens`，缓存仍保留为其子集；思考已属于输出，不能再次累加。缓存写入保持未知。模型标签缺失或完整模型 I/O 超过读取预算时保留模型枚举作为技术标签，不丢弃计量。旧版 `.pb` 不属于本读取器支持的格式，宿主应把这类已知跳过项记为部分覆盖。来源不写入，消息正文和认证信息不进入调用或统计库。
 
 ## 单文件读取
 

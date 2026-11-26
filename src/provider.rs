@@ -13,6 +13,9 @@ pub fn empty_token_usage_for_provider(provider: ProviderKind) -> TokenUsage {
         ProviderKind::CombinedLocalAgents => TokenUsage::zero(),
         ProviderKind::GrokSessionJsonl => TokenUsage::zero(),
         ProviderKind::GlmModelIoJsonl => TokenUsage::zero(),
+        ProviderKind::AntigravityConversationDb => {
+            TokenUsage::zero_with_component_availability(true, false, true)
+        }
         ProviderKind::RolloutJsonl => TokenUsage::zero(),
         ProviderKind::WorkbuddyProjectJsonl => {
             TokenUsage::zero_with_component_availability(true, false, false)
@@ -32,6 +35,8 @@ pub enum ProviderKind {
     GrokSessionJsonl,
     /// ZCode 专用用量表或 CLI 日志的事实；保留历史 provider 协议编码。
     GlmModelIoJsonl,
+    /// Antigravity 本机会话 SQLite 的逐步计量元数据。
+    AntigravityConversationDb,
     /// 从多个已开启本机 Agent 的独立 provider 联合得到的只读事实。
     CombinedLocalAgents,
     /// 从用户授权 WorkBuddy 本机根中的项目 JSONL 观察到的逐请求事实。
@@ -46,6 +51,7 @@ impl ProviderKind {
             Self::ClaudeTranscriptJsonl => Some(crate::SourceClientKind::ClaudeCode),
             Self::GrokSessionJsonl => Some(crate::SourceClientKind::GrokBuildCli),
             Self::GlmModelIoJsonl => Some(crate::SourceClientKind::Glm),
+            Self::AntigravityConversationDb => Some(crate::SourceClientKind::Antigravity),
             Self::WorkbuddyProjectJsonl => Some(crate::SourceClientKind::WorkBuddy),
             Self::CombinedLocalAgents => None,
         }
@@ -58,6 +64,7 @@ impl ProviderKind {
             | Self::ClaudeTranscriptJsonl
             | Self::GrokSessionJsonl
             | Self::GlmModelIoJsonl
+            | Self::AntigravityConversationDb
             | Self::CombinedLocalAgents
             | Self::WorkbuddyProjectJsonl => TotalTokenAccounting::Observed,
         }
@@ -70,6 +77,7 @@ impl ProviderKind {
             Self::ClaudeTranscriptJsonl => "当前 CLAUDE_CONFIG_DIR",
             Self::GrokSessionJsonl => "当前 GROK_HOME",
             Self::GlmModelIoJsonl => "ZCode 本机数据根",
+            Self::AntigravityConversationDb => "Antigravity 本机会话",
             Self::CombinedLocalAgents => "已开启 Agent 的独立数据根",
             Self::WorkbuddyProjectJsonl => "当前 WORKBUDDY_HOME",
         }
@@ -84,6 +92,7 @@ impl ProviderKind {
             }
             Self::GrokSessionJsonl => format!("grok-session-parser-v{parser_version}"),
             Self::GlmModelIoJsonl => format!("glm-model-io-parser-v{parser_version}"),
+            Self::AntigravityConversationDb => format!("antigravity-conversation-parser-v{parser_version}"),
             Self::CombinedLocalAgents => format!("combined-local-agents-v{parser_version}"),
             Self::WorkbuddyProjectJsonl => {
                 format!("workbuddy-project-jsonl-v{parser_version}")

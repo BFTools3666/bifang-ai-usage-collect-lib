@@ -101,7 +101,13 @@ pub(super) fn query(
             .is_err()
         || options
             .FileTypeFilter()
-            .and_then(|filter| filter.Append(&HSTRING::from(".jsonl")))
+            .and_then(|filter| {
+                filter.Append(&HSTRING::from(".jsonl"))?;
+                if agents.contains(SourceClientKind::Antigravity) {
+                    filter.Append(&HSTRING::from(".db"))?;
+                }
+                Ok(())
+            })
             .is_err()
     {
         return false;
@@ -218,9 +224,12 @@ pub(super) fn query(
 
     use super::super::{LocalPathStatus, classify_local_path};
 
-    let Some(predicate) = NSPredicate::predicateFromMetadataQueryString(&NSString::from_str(
-        "kMDItemFSName == '*.jsonl'cd",
-    )) else {
+    let pattern = if agents.contains(SourceClientKind::Antigravity) {
+        "kMDItemFSName == '*.jsonl'cd || kMDItemFSName == '*.db'cd"
+    } else {
+        "kMDItemFSName == '*.jsonl'cd"
+    };
+    let Some(predicate) = NSPredicate::predicateFromMetadataQueryString(&NSString::from_str(pattern)) else {
         return false;
     };
     let query = NSMetadataQuery::new();
@@ -274,3 +283,5 @@ pub(super) fn query(
 ) -> bool {
     false
 }
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use crate::SourceClientKind;

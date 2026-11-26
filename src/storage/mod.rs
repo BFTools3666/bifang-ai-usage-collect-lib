@@ -15,6 +15,8 @@ pub mod workbuddy;
 pub use workbuddy::{WorkbuddyIndex, WorkbuddyIndexOutcome, WorkbuddyRefreshMode};
 mod zcode;
 pub use zcode::ZcodeDatabaseIndexOutcome;
+mod antigravity;
+pub use antigravity::AntigravityDatabaseIndexOutcome;
 mod error;
 mod path_codec;
 mod private_sqlite;

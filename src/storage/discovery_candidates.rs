@@ -54,6 +54,7 @@ fn validate(candidate: &RootCandidate, client: SourceClientKind) -> Result<(), L
                 SourceClientKind::Glm,
                 RootCandidateEvidence::GlmModelIoUpdates
             )
+            | (SourceClientKind::Antigravity, RootCandidateEvidence::AntigravityConversationDb)
     );
     if candidate.client != client
         || !evidence_matches
@@ -89,6 +90,7 @@ fn evidence_label(value: RootCandidateEvidence) -> &'static str {
         RootCandidateEvidence::ClaudeSubagent => "claude_subagent",
         RootCandidateEvidence::GrokSessionUpdates => "grok_updates",
         RootCandidateEvidence::GlmModelIoUpdates => "glm_model_io",
+        RootCandidateEvidence::AntigravityConversationDb => "antigravity_conversation_db",
     }
 }
 
@@ -114,6 +116,7 @@ fn decode(row: QueryResult, client: SourceClientKind) -> Result<RootCandidate, L
             "claude_subagent" => RootCandidateEvidence::ClaudeSubagent,
             "grok_updates" => RootCandidateEvidence::GrokSessionUpdates,
             "glm_model_io" => RootCandidateEvidence::GlmModelIoUpdates,
+            "antigravity_conversation_db" => RootCandidateEvidence::AntigravityConversationDb,
             _ => return Err(invalid()),
         },
     };
